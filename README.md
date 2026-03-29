@@ -1,14 +1,9 @@
-# 🛡️ Lead Intelligence Hub - Official Technical Manual (v1.0.0 PRO)
-
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Docker](https://img.shields.io/badge/Docker-24.0+-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+# leads-importer
 
 ---
 
 ## 📖 Executive Summary
-The **Lead Intelligence Hub** is a production-grade, high-performance ecosystem designed to solve the challenges of fragmented lead data. It provides an automated pipeline for **ingestion**, **geographic enrichment**, and **real-time analytics**, transforming raw file archives into a centralized, intelligence-driven database with zero manual effort.
+The **leads-importer** is a production-grade, high-performance ecosystem designed to solve the challenges of fragmented lead data. It provides an automated pipeline for **ingestion**, **geographic enrichment**, and **real-time analytics**, transforming raw file archives into a centralized database with zero manual effort.
 
 ---
 
@@ -113,4 +108,4 @@ docker exec leads_backend python -m src.run_mass_import
 ```
 
 ---
-*Developed by Stanislav Rudyk. Project Lead Intelligence Hub v1.0.0 Production.*
+*Developed by Stanislav Rudyk. Project leads-importer.*
