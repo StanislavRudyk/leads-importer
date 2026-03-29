@@ -1,0 +1,149 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: leads_db_container
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: leads
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+
+  metabase-db:
+    image: postgres:16
+    container_name: metabase_db_container
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: metabase
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: ${METABASE_DB_PASSWORD:-metabase_pw}
+    volumes:
+      - metabase_db_data:/var/lib/postgresql/data
+    networks:
+      - internal
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase_container
+    restart: unless-stopped
+    depends_on:
+      - metabase-db
+      - db
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: metabase-db
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: metabase
+      MB_DB_PASS: ${METABASE_DB_PASSWORD:-metabase_pw}
+      MB_ENCRYPTION_SECRET_KEY: ${METABASE_ENCRYPTION_SECRET_KEY:-encryption_secret_must_be_long}
+      MB_ENABLE_EMBEDDING: "true"
+      MB_EMBEDDING_SECRET_KEY: ${METABASE_EMBEDDING_SECRET_KEY}
+    ports:
+      - "3000:3000"
+    networks:
+      - internal
+    volumes:
+      - metabase_data:/metabase-data
+
+  nocodb:
+    image: nocodb/nocodb:latest
+    container_name: nocodb_container
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      NC_DB: "pg://db:5432?u=postgres&p=postgres&d=leads"
+    ports:
+      - "8080:8080"
+    networks:
+      - internal
+    volumes:
+      - nocodb_data:/usr/app/data
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_container
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./imports:/home/node/imports
+    networks:
+      - internal
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: leads_backend
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/leads
+      SYNC_DATABASE_URL: postgresql://postgres:postgres@db:5432/leads
+      METABASE_SITE_URL: /analytics
+      METABASE_EMBEDDING_SECRET_KEY: ${METABASE_EMBEDDING_SECRET_KEY}
+      API_KEY: ${API_KEY}
+    volumes:
+      - ./src:/app/src
+      - ./imports:/app/imports
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./Mailchimp:/app/Mailchimp:ro
+      - ./templates:/app/templates
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: leads_frontend
+    volumes:
+      - frontend_dist:/usr/share/nginx/html
+
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx_proxy
+    restart: unless-stopped
+    depends_on:
+      - metabase
+      - nocodb
+      - backend
+      - frontend
+    ports:
+      - "8081:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  metabase_db_data:
+  metabase_data:
+  nocodb_data:
+  frontend_dist:
+  n8n_data:
+
+networks:
+  internal:
+    driver: bridge

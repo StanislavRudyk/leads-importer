@@ -1,0 +1,51 @@
+email:
+  - email
+  - e-mail
+  - Email
+  - EMAIL
+  - почта
+  - mail
+  - "Unnamed: 2"
+
+phone:
+  - phone
+  - phone_number
+  - tel
+  - телефон
+  - mobile
+
+first_name:
+  - first_name
+  - firstname
+  - name
+  - имя
+  - first name
+
+last_name:
+  - last_name
+  - lastname
+  - surname
+  - фамилия
+  - last name
+
+country_iso2:
+  - country
+  - country_code
+  - страна
+  - country_iso2
+  - "Unnamed: 1"
+
+nationality:
+  - nationality
+  - национальность
+  - nation
+
+city:
+  - city
+  - город
+  - town
+
+language:
+  - language
+  - lang
+  - язык

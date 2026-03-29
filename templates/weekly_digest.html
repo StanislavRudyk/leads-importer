@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; }
+        .header { background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff; text-align: center; }
+        .section { margin-top: 25px; }
+        .stat-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+        .stat-item { flex: 1; min-width: 140px; background: #f0f4f8; padding: 15px; border-radius: 6px; text-align: center; }
+        .stat-value { font-size: 20px; font-weight: bold; color: #007bff; }
+        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
+        .footer { margin-top: 40px; font-size: 12px; color: #999; text-align: center; }
+        .list-group { list-style: none; padding: 0; }
+        .list-item { padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>Weekly Leads Report</h2>
+            <p>{{ stats.new_this_week + stats.updated_this_week }} updates this week</p>
+        </div>
+
+        <div class="section">
+            <p>Hi {{ name }},</p>
+            <p>Please find below this week's summary of our leads database.</p>
+        </div>
+
+        <div class="section">
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">DATABASE OVERVIEW</h3>
+            <div class="stat-grid">
+                <div class="stat-item">
+                    <div class="stat-value">{{ "{:,}".format(stats.total_leads) }}</div>
+                    <div class="stat-label">Total Leads</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">+{{ stats.new_this_week }}</div>
+                    <div class="stat-label">New This Week</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">+{{ stats.updated_this_week }}</div>
+                    <div class="stat-label">Updated Records</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">DATA QUALITY</h3>
+            <ul class="list-group">
+                <li class="list-item">
+                    <span>With phone number:</span>
+                    <strong>{{ stats.data_quality.phone_count }} ({{ stats.data_quality.phone_pct }}%)</strong>
+                </li>
+                <li class="list-item">
+                    <span>With full name:</span>
+                    <strong>{{ stats.data_quality.name_count }} ({{ stats.data_quality.name_pct }}%)</strong>
+                </li>
+                <li class="list-item">
+                    <span>With country:</span>
+                    <strong>{{ stats.data_quality.country_count }} ({{ stats.data_quality.country_pct }}%)</strong>
+                </li>
+                <li class="list-item">
+                    <span>Buyers (is_buyer):</span>
+                    <strong>{{ stats.data_quality.buyer_count }} ({{ stats.data_quality.buyer_pct }}%)</strong>
+                </li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">TOP 5 COUNTRIES</h3>
+            <ul class="list-group">
+                {% for c in stats.top_countries %}
+                <li class="list-item">
+                    <span>{{ loop.index }}. {{ c.name }}</span>
+                    <strong>{{ "{:,}".format(c.count) }}</strong>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="section">
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">TOP TRAFFIC SOURCES THIS WEEK</h3>
+            <ul class="list-group">
+                {% for s in stats.top_sources %}
+                <li class="list-item">
+                    <span>{{ loop.index }}. {{ s.name }}</span>
+                    <strong>{{ s.count }}</strong>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="section">
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">IMPORTS THIS WEEK</h3>
+            <p>Files processed: <strong>{{ stats.imports.processed }}</strong></p>
+            <p>Successful: <strong>{{ stats.imports.success }}</strong> | Failed: <strong>{{ stats.imports.failed }}</strong></p>
+        </div>
+
+        <div class="footer">
+            <p>If you have any questions, feel free to reach out.</p>
+            <p>Best regards,<br><b>Antigravity AI System</b></p>
+        </div>
+    </div>
+</body>
+</html>

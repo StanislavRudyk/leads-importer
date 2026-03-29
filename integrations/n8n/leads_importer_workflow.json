@@ -1,0 +1,85 @@
+{
+  "name": "Leads Importer Ingestion Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "upload-leads",
+        "options": {}
+      },
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "id": "e7b1a2b3-c4d5-4e6f-8a90-1234567890ab"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://leads-importer:8000/api/v1/import/upload",
+        "authentication": "headerAuth",
+        "sendBinaryData": true,
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "name": "HTTP Request: Upload File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        350,
+        300
+      ],
+      "id": "f8c2b3c4-d5e6-4f7g-8h9i-0987654321ba",
+      "credentials": {
+        "headerAuth": {
+          "id": "API-Key-Credentials",
+          "name": "Leads Importer API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#leads-alerts",
+        "text": " *New Import Successful!*\n*File:* {{$node[\"HTTP Request: Upload File\"].json[\"filename\"] || \"Uploaded File\"}}\n*Total Rows:* {{$node[\"HTTP Request: Upload File\"].json[\"rows_total\"]}}\n*Inserted:* {{$node[\"HTTP Request: Upload File\"].json[\"rows_inserted\"]}}\n*Updated:* {{$node[\"HTTP Request: Upload File\"].json[\"rows_updated\"]}}\n*Skipped:* {{$node[\"HTTP Request: Upload File\"].json[\"rows_skipped\"]}}\n\n*Check the Dashboard:* http://leads-importer:8081",
+        "otherAttributes": {}
+      },
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "id": "g9d3c4d5-e6f7-4g8h-9i0j-1122334455cc"
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request: Upload File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request: Upload File": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {}
+
+}
