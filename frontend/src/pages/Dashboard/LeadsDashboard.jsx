@@ -12,6 +12,9 @@ const API_KEY = "gmp79b9qSN}&JWX";
 
 function fmt(n) { return n == null ? '—' : Number(n).toLocaleString('en'); }
 
+// Определяем базовый URL для API (бэкенд на порту 8000)
+const API_BASE = '';
+
 const LeadsDashboard = () => {
   const [userRole, setUserRole] = useState('admin');
   const [activeTab, setActiveTab] = useState(15);
@@ -27,30 +30,37 @@ const LeadsDashboard = () => {
   const [campaignData, setCampaignData] = useState([]);
   const [importData, setImportData] = useState([]);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (isBackground = false) => {
+    if (!isBackground) setLoading(true);
     try {
       if (activeTab === 15) {
-        const r = await fetch('/api/v1/dashboard/overview');
+        const r = await fetch(`${API_BASE}/api/v1/dashboard/overview`);
+        if (!r.ok) throw new Error("API Error");
         const d = await r.json();
-        setData(d);
+        setData(Array.isArray(d) ? d : []);
       } else if (activeTab === 16) {
-        const r = await fetch('/api/v1/dashboard/sources');
+        const r = await fetch(`${API_BASE}/api/v1/dashboard/sources`);
+        if (!r.ok) throw new Error("API Error");
         const d = await r.json();
-        setCampaignData(d);
+        setCampaignData(Array.isArray(d) ? d : []);
       } else if (activeTab === 17) {
-        const r = await fetch('/api/v1/dashboard/imports');
+        const r = await fetch(`${API_BASE}/api/v1/dashboard/imports`);
+        if (!r.ok) throw new Error("API Error");
         const d = await r.json();
-        setImportData(d);
+        setImportData(Array.isArray(d) ? d : []);
       }
     } catch (e) {
       console.error("Fetch error:", e);
     }
-    setLoading(false);
+    if (!isBackground) setLoading(false);
   };
 
   useEffect(() => {
-    fetchData();
+    fetchData(); // Initial load
+    const interval = setInterval(() => {
+      fetchData(true); // Silent re-fetch every 5 seconds
+    }, 5000);
+    return () => clearInterval(interval);
   }, [activeTab]);
 
   const availableTabs = useMemo(() => {
@@ -74,7 +84,7 @@ const LeadsDashboard = () => {
     formData.append("file", file);
 
     try {
-      const res = await fetch(`/api/v1/import/upload?source_name=${encodeURIComponent(file.name)}`, {
+      const res = await fetch(`${API_BASE}/api/v1/import/upload?source_name=${encodeURIComponent(file.name)}`, {
         method: "POST",
         headers: { "API-Key": API_KEY },
         body: formData
@@ -90,6 +100,56 @@ const LeadsDashboard = () => {
     }
     setImporting(false);
     setTimeout(() => setMessage(null), 5000);
+  };
+
+  const handleFolderUpload = async (e) => {
+    const rawFiles = e.target.files;
+    if (!rawFiles || rawFiles.length === 0) return;
+    
+    const files = Array.from(rawFiles).filter(f => !f.name.startsWith('.'));
+    if (!files.length) return;
+
+    setImporting(true);
+    let successCount = 0;
+    let errorCount = 0;
+    let completed = 0;
+    const concurrencyLimit = 5; // Parallel workers
+
+    const processFile = async (file) => {
+        const formData = new FormData();
+        formData.append("file", file);
+        const sourcePath = file.webkitRelativePath || file.name;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/v1/import/upload?source_name=${encodeURIComponent(sourcePath)}`, {
+                method: "POST",
+                headers: { "API-Key": API_KEY },
+                body: formData
+            });
+            if (res.ok) successCount++;
+            else errorCount++;
+        } catch (err) {
+            errorCount++;
+        }
+        completed++;
+        setMessage({ text: `Uploading... ${completed} of ${files.length} files processed`, type: "info" });
+    };
+
+    setMessage({ text: `Starting parallel upload of ${files.length} files...`, type: "info" });
+    
+    // Execute pool
+    const queue = [...files];
+    const workers = Array(Math.min(concurrencyLimit, queue.length)).fill(null).map(async () => {
+        while (queue.length > 0) {
+            await processFile(queue.shift());
+        }
+    });
+
+    await Promise.all(workers);
+    
+    setMessage({ text: `Folder upload complete. ${successCount} successful, ${errorCount} failed.`, type: successCount > 0 ? "success" : "error" });
+    setImporting(false);
+    setTimeout(() => setMessage(null), 10000);
   };
 
   const filteredData = useMemo(() => {
@@ -226,23 +286,45 @@ const LeadsDashboard = () => {
   );
 
   return (
-    <>
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <div className="topbar">
         <div className="logo"><b style={{color: '#fff'}}>LEADS IMPORTER</b> <span style={{color: '#6b7280'}}>• Analytics Core</span></div>
         <div className="hacts">
           {message && <span style={{marginRight:'15px', fontSize:'12px', color: message.type==='error'?'#ef4444':'#add6ff'}}>{message.text}</span>}
           <button className="ref-btn" onClick={fetchData} style={{background:'transparent', border:'1px solid #374151', color:'#9ca3af', padding:'5px 12px', borderRadius:'4px', marginRight:'10px', cursor:'pointer'}}>↻ Refresh</button>
+          <label className="ulbl" style={{background:'#10b981', color:'#fff', padding:'5px 15px', borderRadius:'4px', cursor: importing ? 'not-allowed' : 'pointer', fontSize:'13px', fontWeight:600, marginRight:'10px'}}>{importing ? "Processing..." : "Import Folder"}<input type="file" webkitdirectory="" directory="" multiple onChange={handleFolderUpload} disabled={importing} style={{display:'none'}} /></label>
           <label className="ulbl" style={{background:'#3b82f6', color:'#fff', padding:'5px 15px', borderRadius:'4px', cursor: importing ? 'not-allowed' : 'pointer', fontSize:'13px', fontWeight:600}}>{importing ? "Processing..." : "Import CSV"}<input type="file" onChange={handleFileUpload} disabled={importing} style={{display:'none'}} /></label>
         </div>
       </div>
-      <div className="sidebar">
-        <div><div className="sl">Dashboards</div><div style={{display:'flex', flexDirection:'column', gap:'5px', marginTop:'10px'}}>{availableTabs.map(tab => (<button key={tab.id} className={`fbtn ${activeTab === tab.id ? 'active' : ''}`} onClick={() => setActiveTab(tab.id)} style={{justifyContent: 'flex-start', borderLeft: activeTab===tab.id?'3px solid #3b82f6':'3px solid transparent'}}><span className="rdot" style={{background: activeTab === tab.id ? '#3b82f6' : '#4b5563', marginRight:'8px'}}></span>{tab.title}</button>))}</div></div>
-        <div className="dvd"></div>
-        <div><div className="sl">Session Role</div><select value={userRole} onChange={e => setUserRole(e.target.value)} style={{width: '100%', marginTop:'8px', background: '#111827', color: '#e5e7eb', border: '1px solid #374151', padding: '8px', borderRadius: '6px', cursor: 'pointer', fontFamily:'var(--fn)'}}><option value="admin">Administrator (All Access)</option><option value="manager">Manager (Metrics & Sources)</option><option value="viewer">Viewer (Metrics Only)</option></select></div>
-        {activeTab === 15 && (<><div className="dvd"></div><div><div className="sl" style={{marginBottom:'10px'}}>Data Granularity</div><div style={{display:'flex', gap:'5px', background:'#111827', border:'1px solid #374151', borderRadius:'6px', padding:'4px', overflow:'hidden'}}><button onClick={() => setViewMode('country')} style={{flex: 1, padding:'6px', background: viewMode==='country'?'#3b82f6':'transparent', border:'none', color:viewMode==='country'?'#fff':'#9ca3af', borderRadius:'4px', cursor:'pointer', fontFamily:'var(--fn)', fontSize:'12px', fontWeight:viewMode==='country'?600:400}}>by Country</button><button onClick={() => setViewMode('city')} style={{flex: 1, padding:'6px', background: viewMode==='city'?'#3b82f6':'transparent', border:'none', color:viewMode==='city'?'#fff':'#9ca3af', borderRadius:'4px', cursor:'pointer', fontFamily:'var(--fn)', fontSize:'12px', fontWeight:viewMode==='city'?600:400}}>by City</button></div></div><div className="dvd"></div><div><div className="sl" style={{marginBottom:'10px'}}>Search Filters</div><input type="text" placeholder="Type city or country..." value={search} onChange={e=>setSearch(e.target.value)} style={{width:'100%', background:'#111827', border:'1px solid #374151', borderRadius:'6px', padding:'8px 12px', color:'#f3f4f6', fontFamily:'var(--fn)', fontSize:'12px'}} /></div></>)}
+      <div className="page" style={{ display: 'flex', flex: 1 }}>
+        <div className="sidebar">
+          <div>
+            <div className="sl">Main Menu</div>
+            <div style={{display:'flex', flexDirection:'column', gap:'5px', marginTop:'10px'}}>
+              <button className="fbtn active" style={{justifyContent: 'flex-start', borderLeft: '3px solid #3b82f6'}}>
+                <span className="rdot" style={{marginRight:'8px'}}></span>Overview
+              </button>
+              <button className="fbtn" onClick={() => window.location.href = '/analytics'} style={{justifyContent: 'flex-start', borderLeft: '3px solid transparent'}}>
+                <span className="rdot" style={{marginRight:'8px'}}></span>BI Analytics
+              </button>
+            </div>
+          </div>
+          <div className="dvd"></div>
+          <div><div className="sl">Dashboards</div><div style={{display:'flex', flexDirection:'column', gap:'5px', marginTop:'10px'}}>{availableTabs.map(tab => (<button key={tab.id} className={`fbtn ${activeTab === tab.id ? 'active' : ''}`} onClick={() => setActiveTab(tab.id)} style={{justifyContent: 'flex-start', borderLeft: activeTab===tab.id?'3px solid #3b82f6':'3px solid transparent'}}><span className="rdot" style={{background: activeTab === tab.id ? '#3b82f6' : '#4b5563', marginRight:'8px'}}></span>{tab.title}</button>))}</div></div>
+          <div className="dvd"></div>
+          <div><div className="sl">Session Role</div><select value={userRole} onChange={e => setUserRole(e.target.value)} style={{width: '100%', marginTop:'8px', background: '#111827', color: '#e5e7eb', border: '1px solid #374151', padding: '8px', borderRadius: '6px', cursor: 'pointer', fontFamily:'var(--fn)'}}><option value="admin">Administrator (All Access)</option><option value="manager">Manager (Metrics & Sources)</option><option value="viewer">Viewer (Metrics Only)</option></select></div>
+          {activeTab === 15 && (<><div className="dvd"></div><div><div className="sl" style={{marginBottom:'10px'}}>Data Granularity</div><div style={{display:'flex', gap:'5px', background:'#111827', border:'1px solid #374151', borderRadius:'6px', padding:'4px', overflow:'hidden'}}><button onClick={() => setViewMode('country')} style={{flex: 1, padding:'6px', background: viewMode==='country'?'#3b82f6':'transparent', border:'none', color:viewMode==='country'?'#fff':'#9ca3af', borderRadius:'4px', cursor:'pointer', fontFamily:'var(--fn)', fontSize:'12px', fontWeight:viewMode==='country'?600:400}}>by Country</button><button onClick={() => setViewMode('city')} style={{flex: 1, padding:'6px', background: viewMode==='city'?'#3b82f6':'transparent', border:'none', color:viewMode==='city'?'#fff':'#9ca3af', borderRadius:'4px', cursor:'pointer', fontFamily:'var(--fn)', fontSize:'12px', fontWeight:viewMode==='city'?600:400}}>by City</button></div></div><div className="dvd"></div><div><div className="sl" style={{marginBottom:'10px'}}>Search Filters</div><input type="text" placeholder="Type city or country..." value={search} onChange={e=>setSearch(e.target.value)} style={{width:'100%', background:'#111827', border:'1px solid #374151', borderRadius:'6px', padding:'8px 12px', color:'#f3f4f6', fontFamily:'var(--fn)', fontSize:'12px'}} /></div></>)}
+          <div className="dvd"></div>
+          <div className="sidebar-footer">
+            <div className="sl">System Link</div>
+            <a href="/nocodb/" target="_blank" rel="noreferrer" className="fbtn" style={{textDecoration:'none'}}>
+              <span className="rdot" style={{marginRight:'8px', background:'#10b981'}}></span>NocoDB Tables
+            </a>
+          </div>
+        </div>
+        <div className="content">{loading ? (<div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'50vh', color:'#9ca3af'}}><div style={{fontSize: '18px', fontWeight: 500}}>Syncing Core DB...</div></div>) : (<>{activeTab === 15 && renderTab1()}{activeTab === 16 && renderTab2()}{activeTab === 17 && renderTab3()}</>)}</div>
       </div>
-      <div className="content">{loading ? (<div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'50vh', color:'#9ca3af'}}><div style={{fontSize: '18px', fontWeight: 500}}>Syncing Core DB...</div></div>) : (<>{activeTab === 15 && renderTab1()}{activeTab === 16 && renderTab2()}{activeTab === 17 && renderTab3()}</>)}</div>
-    </>
+    </div>
   );
 };
 

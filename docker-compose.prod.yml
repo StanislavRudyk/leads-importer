@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: leads_db_prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: leads
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    networks:
+      - prod_network
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: leads_backend_prod
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/leads
+      SYNC_DATABASE_URL: postgresql://postgres:postgres@db:5432/leads
+      API_KEY: "gmp79b9qSN}&JWX"
+    volumes:
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./imports:/app/imports
+      - ./Mailchimp:/app/Mailchimp:ro
+    ports:
+      - "8000:8000"
+    networks:
+      - prod_network
+
+volumes:
+  postgres_data_prod:
+
+networks:
+  prod_network:
+    driver: bridge

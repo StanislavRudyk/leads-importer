@@ -1,136 +1,225 @@
-import pathlib as ph 
-import yaml 
-import os 
-import pandas as pd 
-import logging 
-logger =logging .getLogger ('leads_importer.parser')
+import os
+import re
+import pathlib as ph
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set
 
-def get_mappings_from_yaml ()->dict :
-    yaml_path =os .path .join (os .path .dirname (__file__ ),'..','config','column_mappings.yaml')
-    if not os .path .exists (yaml_path ):
-        return {}
-    with open (yaml_path ,'r',encoding ='utf-8')as f :
-        config =yaml .safe_load (f )
-    mappings ={}
-    if config :
-        for std ,syns in config .items ():
-            if syns :
-                for s in syns :
-                    mappings [str (s ).strip ().lower ()]=std 
-    return mappings 
+import pandas as pd
+import yaml
 
-def get_standard_column_name (raw_name ,mappings ):
-    if not raw_name :
-        return None 
-    clean =str (raw_name ).strip ().lower ()
-    return mappings .get (clean )
+from .normalizer import extract_file_date, extract_context_from_path
 
-async def stream_process_file (file_path :str ,source_name :str ):
-    path =ph .Path (file_path )
-    mappings =get_mappings_from_yaml ()
-    ext =path .suffix .lower ()
-    implicit_country =None 
-    implicit_city =None 
-    parts =[str (p ).strip ()for p in path .parts ]
-    lower_parts =[p .lower ()for p in parts ]
+import logging
 
-    try :
-        if 'mailchimp'in lower_parts :
-            idx =lower_parts .index ('mailchimp')
+logger = logging.getLogger('leads_importer.parser')
+
+SUPPORTED_EXTENSIONS: Set[str] = {'.csv', '.xlsx', '.xls'}
+MAX_FILE_SIZE_BYTES: int = 100 * 1024 * 1024
+ENCODINGS_TO_TRY: List[str] = ['utf-8', 'utf-8-sig', 'windows-1251', 'latin-1', 'iso-8859-1']
+
+_YAML_CACHE: Optional[Dict[str, str]] = None
 
 
-            if len (lower_parts )>idx +1 :
-                country_part =lower_parts [idx +1 ]
-                if 'usa'in country_part :implicit_country ='US'
-                elif 'canada'in country_part :implicit_country ='CA'
-                elif 'europe'in country_part :implicit_country ='GB'
-                elif 'middle'in country_part or 'dubai'in country_part :implicit_country ='AE'
-                elif 'australia'in country_part or 'oceania'in country_part :implicit_country ='AU'
-                elif 'asia'in country_part :implicit_country ='PH'
+def get_mappings_from_yaml() -> Dict[str, str]:
+    """Загрузка маппинга колонок из YAML (кешируется)."""
+    global _YAML_CACHE
+    if _YAML_CACHE is not None:
+        return _YAML_CACHE
+
+    yaml_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'column_mappings.yaml')
+    if not os.path.exists(yaml_path):
+        _YAML_CACHE = {}
+        return _YAML_CACHE
+
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+
+    mappings: Dict[str, str] = {}
+    if config:
+        for standard_field, synonyms in config.items():
+            if synonyms:
+                for syn in synonyms:
+                    mappings[str(syn).strip().lower()] = standard_field
+    _YAML_CACHE = mappings
+    return _YAML_CACHE
 
 
+def _read_dataframe(file_path: str) -> Optional[pd.DataFrame]:
+    """Быстрое чтение файла в DataFrame."""
+    ext = ph.Path(file_path).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return None
 
-            if len (parts )>idx +2 :
+    df = None
+    try:
+        if ext in {'.xlsx', '.xls'}:
+            df = pd.read_excel(file_path, dtype=str, engine='openpyxl' if ext == '.xlsx' else None)
+        elif ext == '.csv':
+            for enc in ENCODINGS_TO_TRY:
+                try:
+                    df = pd.read_csv(file_path, sep=None, engine='python', dtype=str, on_bad_lines='skip', encoding=enc)
+                    break
+                except:
+                    continue
+    except Exception as e:
+        logger.error(f'Ошибка чтения {file_path}: {e}')
+        return None
 
-                potential_city =parts [idx +2 ]
+    if df is None or df.empty:
+        return None
+
+    df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
+    if df.empty:
+        return None
+
+    df = df.reset_index(drop=True)
+
+    # Поиск начала данных (первая строка с email)
+    for idx in range(min(10, len(df))):
+        row = df.iloc[idx]
+        found_email = False
+        for val in row:
+            s = str(val).strip()
+            if '@' in s and '.' in s and ' ' not in s and len(s) > 5:
+                found_email = True
+                break
+        if found_email:
+            if idx > 0:
+                prev = df.iloc[idx - 1]
+                has_text = any(isinstance(v, str) and v.strip() and not v.strip().replace('.', '').isdigit() for v in prev)
+                if has_text:
+                    df.columns = df.iloc[idx - 1]
+                else:
+                    df.columns = [f'col_{i}' for i in range(len(df.columns))]
+                df = df.iloc[idx:]
+            elif idx == 0:
+                for col_name in df.columns:
+                    if '@' in str(col_name) and '.' in str(col_name):
+                        df.columns = [f'col_{i}' for i in range(len(df.columns))]
+                        break
+            break
+
+    return df.dropna(how='all').reset_index(drop=True)
 
 
-                if potential_city ==path .name :
+def _build_col_map(df: pd.DataFrame, mappings: Dict[str, str]) -> Dict[int, str]:
+    """Определение типа каждой колонки (один раз на файл)."""
+    col_map: Dict[int, str] = {}
+    mapped = set()
+
+    # По названиям колонок
+    for i, col in enumerate(df.columns):
+        key = str(col).strip().lower()
+        if key in mappings:
+            col_map[i] = mappings[key]
+            mapped.add(mappings[key])
+
+    if mapped:
+        return col_map
+
+    # По содержимому (первые 30 строк)
+    from .city_data import KNOWN_CITIES, COUNTRY_ALIASES
+
+    sample = df.head(30)
+    for i in range(len(df.columns)):
+        if i in col_map:
+            continue
+        col = sample.iloc[:, i].dropna().astype(str).str.strip()
+        if col.empty:
+            continue
+
+        if 'email' not in mapped:
+            hits = col.str.contains(r'^[^@\s]+@[^@\s]+\.[a-zA-Z]{2,}$', regex=True, na=False).sum()
+            if hits >= min(3, max(1, int(len(col) * 0.3))):
+                col_map[i] = 'email'
+                mapped.add('email')
+                continue
+
+        if 'country_iso2' not in mapped:
+            hits = sum(1 for v in col.head(15) if (len(v) == 2 and v.isalpha()) or v.lower() in COUNTRY_ALIASES)
+            if hits >= min(4, max(1, int(len(col.head(15)) * 0.4))):
+                col_map[i] = 'country_iso2'
+                mapped.add('country_iso2')
+                continue
+
+        if 'city' not in mapped:
+            hits = sum(1 for v in col.head(15) if v.lower() in KNOWN_CITIES)
+            if hits >= min(3, max(1, int(len(col.head(15)) * 0.3))):
+                col_map[i] = 'city'
+                mapped.add('city')
+                continue
+
+    return col_map
 
 
-                    potential_city =parts [idx +1 ]
+def parse_file_bulk(file_path: str, source_name: Optional[str] = None) -> List[Dict[str, object]]:
+    """Быстрый парсинг файла — возвращает список словарей (не генератор)."""
+    path = ph.Path(file_path)
+    if not path.exists() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return []
+
+    sz = path.stat().st_size
+    if sz > MAX_FILE_SIZE_BYTES or sz == 0:
+        return []
+
+    file_context = extract_context_from_path(file_path)
+    file_date = extract_file_date(file_path)
+    mappings = get_mappings_from_yaml()
+
+    df = _read_dataframe(file_path)
+    if df is None:
+        return []
+
+    col_map = _build_col_map(df, mappings)
+    ncols = len(df.columns)
+    fname = path.name
+
+    logger.debug(f'{fname}: {len(df)} строк, колонки: {col_map}')
+
+    results = []
+    data = df.values  # numpy — быстрый доступ
+
+    for row_idx in range(len(data)):
+        row = data[row_idx]
+        rec: Dict[str, object] = {}
+        meta: Dict[str, str] = {}
+
+        for ci in range(ncols):
+            val = row[ci] if ci < len(row) else None
+            if val is None:
+                continue
+            s = str(val).strip()
+            if not s or s.lower() in ('nan', 'none', 'null', 'n/a', ''):
+                continue
+
+            if ci in col_map:
+                rec[col_map[ci]] = s
+            elif 'email' not in rec and '@' in s and '.' in s and len(s) > 5 and ' ' not in s:
+                rec['email'] = s
+            else:
+                meta[f'c{ci}'] = s
+
+        if 'email' not in rec:
+            continue
+
+        if meta:
+            rec['_raw_meta'] = meta
+        rec['_file_context'] = file_context
+        rec['_file_date'] = file_date
+        rec['_source_file'] = fname
+        results.append(rec)
+
+    return results
 
 
-                if not any (x in potential_city .lower ()for x in ['(1)','(2)','(3)','(4)','(5)','(6)','master','mailchimp','total']):
-                    implicit_city =potential_city 
-    except Exception as e :
-        logger .warning (f"Path parsing failed for {file_path }: {e }")
-    df =None 
-    if ext in {'.xlsx','.xls'}:
-        try :
-            df =pd .read_excel (file_path ,dtype =str )
-        except Exception as e :
-            logger .error (f'Excel read failed: {e }')
-            raise ValueError (f'Invalid Excel file: {e }')
-    elif ext =='.csv':
-        encodings =['utf-8','windows-1251','latin-1']
-        for enc in encodings :
-            try :
-                df =pd .read_csv (file_path ,sep =None ,engine ='python',encoding =enc ,dtype =str )
-                logger .info (f'Successfully read CSV with {enc }')
-                break 
-            except (UnicodeDecodeError ,pd .errors .ParserError ):
-                continue 
-        if df is None :
-            raise ValueError ('CSV failed to load with supported encodings (utf-8, windows-1251, latin-1)')
-    else :
-        raise ValueError (f'Unsupported file format: {ext }')
-    if df is None or df .empty :
-        return 
-    df =df .fillna ('')
-    has_email_col =False 
-    for col in df .columns :
-        col_str =str (col ).lower ()
-        if 'email'in col_str or 'mail'in col_str :
-            has_email_col =True 
-            break 
-    if not has_email_col :
-        for _ ,row in df .head (10 ).iterrows ():
-            for val in row :
-                v_str =str (val ).strip ()
-                if '@'in v_str and '.'in v_str :
-                    has_email_col =True 
-                    break 
-            if has_email_col :
-                break 
-    if not has_email_col :
-        raise ValueError ('Critical: No email column detected in file.')
-    for _ ,series in df .iterrows ():
-        row_dict =series .to_dict ()
-        email =None 
-        for k ,v in row_dict .items ():
-            val_str =str (v ).strip ()
-            if val_str and '@'in val_str and ('.'in val_str ):
-                email =val_str 
-                break 
-        if not email :
-            yield {'_error':'No email found in row'}
-            continue 
-        res ={'email':email }
-        meta ={}
-        for k ,v in row_dict .items ():
-            val_clean =str (v ).strip ()
-            if val_clean ==email or val_clean =='':
-                continue 
-            std =get_standard_column_name (k ,mappings )
-            if std :
-                res [std ]=val_clean 
-            else :
-                meta [str (k )]=val_clean 
-        res ['metadata']=meta 
-        res ['source']=path .name 
-        if not res .get ('city')and implicit_city :
-            res ['city']=implicit_city 
-        if not res .get ('country_iso2')and implicit_country :
-            res ['country_iso2']=implicit_country 
-        yield res 
+# Обратная совместимость
+async def parse_file(file_path: str, source_name: Optional[str] = None):
+    """Совместимость со старым async API — оборачивает bulk."""
+    rows = parse_file_bulk(file_path, source_name)
+    for r in rows:
+        yield r
+
+async def stream_process_file(file_path: str, source_name: str):
+    """Алиас для обратной совместимости."""
+    async for row in parse_file(file_path, source_name):
+        yield row

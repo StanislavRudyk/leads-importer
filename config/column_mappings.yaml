@@ -5,14 +5,35 @@ email:
   - EMAIL
   - почта
   - mail
+  - Email Address
+  - email_address
+  - EMAIL ADDRESS
+  - "Email address"
+  - "email address"
+  - E-mail
   - "Unnamed: 2"
 
 phone:
   - phone
   - phone_number
+  - Phone Number
+  - PHONE
   - tel
   - телефон
   - mobile
+  - Mobile
+  - cell
+  - Cell
+  - Contact Phone
+  - WhatsApp
+  - Phone
+  - "Phone number"
+  - "phone number"
+  - PHONE NUMBER
+  - telephone
+  - Telephone
+  - "Mobile Number"
+  - "mobile number"
 
 first_name:
   - first_name
@@ -20,6 +41,14 @@ first_name:
   - name
   - имя
   - first name
+  - First Name
+  - FNAME
+  - Name
+  - FIRST NAME
+  - "First name"
+  - "first name"
+  - FirstName
+  - given_name
 
 last_name:
   - last_name
@@ -27,25 +56,86 @@ last_name:
   - surname
   - фамилия
   - last name
+  - Last Name
+  - LNAME
+  - LAST NAME
+  - "Last name"
+  - "last name"
+  - LastName
+  - family_name
+  - Surname
 
 country_iso2:
   - country
   - country_code
   - страна
   - country_iso2
+  - CC
+  - Country
+  - COUNTRY
+  - "Country Code"
+  - "country code"
+  - COUNTRY CODE
   - "Unnamed: 1"
 
 nationality:
   - nationality
   - национальность
   - nation
+  - Nationality
+  - NATIONALITY
 
 city:
   - city
   - город
   - town
+  - City
+  - CITY
+  - Hometown
+  - hometown
+  - Town
+  - TOWN
+  - "City/Town"
+  - location
+  - Location
+  - LOCATION
+
+state:
+  - state
+  - State
+  - STATE
+  - REGION
+  - region
+  - Region
+  - Province
+  - province
+  - "State/Province"
+  - "state/province"
+  - "State/Region"
 
 language:
   - language
   - lang
   - язык
+  - Language
+  - LANGUAGE
+  - "Preferred Language"
+
+is_buyer:
+  - is_buyer
+  - buyer
+  - Buyer
+  - IS_BUYER
+  - purchased
+  - has_purchased
+  - customer
+  - "Ticket Buyer"
+  - "ticket buyer"
+
+tags:
+  - tags
+  - Tags
+  - TAGS
+  - labels
+  - Labels
+  - categories
