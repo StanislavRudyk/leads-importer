@@ -12,4 +12,4 @@ RUN npm run build
 FROM alpine:3.19
 COPY --from=build /app/dist /usr/share/nginx/html
 
-CMD ["echo", "Frontend build complete. Files in /usr/share/nginx/html"]
+CMD ["sh", "-c", "cp -rv /usr/share/nginx/html/* /target/ && echo 'Frontend build sync complete'"]

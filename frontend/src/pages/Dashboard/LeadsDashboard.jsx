@@ -29,10 +29,18 @@ const LeadsDashboard = () => {
 
   const [campaignData, setCampaignData] = useState([]);
   const [importData, setImportData] = useState([]);
+  const [tab1Metrics, setTab1Metrics] = useState(null);
 
   const fetchData = async (isBackground = false) => {
     if (!isBackground) setLoading(true);
     try {
+      const msR = await fetch(`${API_BASE}/api/v1/dashboard/metrics`);
+      if (msR.ok) {
+          const msD = await msR.json();
+          setTab1Metrics(msD);
+      }
+      
+
       if (activeTab === 15) {
         const r = await fetch(`${API_BASE}/api/v1/dashboard/overview`);
         if (!r.ok) throw new Error("API Error");
@@ -174,11 +182,11 @@ const LeadsDashboard = () => {
   }, [filteredData, viewMode]);
 
   const tab1Stats = useMemo(() => {
-    const tL = aggregatedData.reduce((s, d) => s + (d.leads || 0), 0);
-    const t7 = aggregatedData.reduce((s, d) => s + (d.leads_7d || 0), 0);
-    const doneC = aggregatedData.filter(d => d.status === 'done').length;
+    const tL = tab1Metrics ? tab1Metrics.totalLeads : aggregatedData.reduce((s, d) => s + (d.leads || 0), 0);
+    const t7 = tab1Metrics ? tab1Metrics.leads7d : aggregatedData.reduce((s, d) => s + (d.leads_7d || 0), 0);
+    const doneC = tab1Metrics ? tab1Metrics.completed : aggregatedData.filter(d => d.status === 'done').length;
     return { tL, t7, doneC, m: aggregatedData.length, rawCities: filteredData.length };
-  }, [aggregatedData, filteredData]);
+  }, [aggregatedData, filteredData, tab1Metrics]);
 
   const barChartData = useMemo(() => {
     const top = aggregatedData.slice(0, 15);
@@ -218,6 +226,8 @@ const LeadsDashboard = () => {
         <div className="mc g"><div className="mlb">Completed</div><div className="mv">{tab1Stats.doneC}</div><div className="ms">status: done</div></div>
         <div className="mc"><div className="mlb">Upcoming</div><div className="mv">{tab1Stats.m - tab1Stats.doneC}</div><div className="ms">status: new</div></div>
       </div>
+
+
       <div className="charts-row">
         <div className="cc" style={{flex: 2}}>
           <div className="ct">Leads by {viewMode === 'city' ? 'Market' : 'Country'} — Top 15</div>

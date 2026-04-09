@@ -56,26 +56,27 @@ demonyms = {
     }
 
 def normalize_email(email: object) -> Optional[str]:
-    """Нормализация email: приведение к нижнему регистру, очистка от мусора и валидация."""
+    """Нормализация email: извлечение адреса, приведение к нижнему регистру и валидация."""
     if email is None:
         return None
 
-    email_str = str(email).strip()
-    if not email_str or email_str.lower() in ('nan', 'none', 'null', 'n/a', ''):
+    email_str = str(email).strip().lower()
+    if not email_str or email_str in ('nan', 'none', 'null', 'n/a', ''):
         return None
 
-    email_str = _JUNK_TAIL_RE.sub('', email_str)
-    email_str = _JUNK_HEAD_RE.sub('', email_str)
-    email_str = email_str.lower().replace(' ', '')
-
-    if not _EMAIL_RE.match(email_str):
+    # Более надежное извлечение почты из строки (например, "Name <a@b.com>" или "Namea@b.com")
+    # Мы ищем подстроку, которая соответствует формату email
+    match = re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', email_str)
+    if not match:
         return None
 
-    local, domain = email_str.rsplit('@', 1)
-    if len(local) > 64 or len(domain) > 253 or '..' in email_str:
+    clean_email = match.group(0).replace(' ', '')
+
+    # Дополнительная валидация
+    if '..' in clean_email or clean_email.startswith('.') or clean_email.endswith('.'):
         return None
 
-    return email_str
+    return clean_email
 
 _phone_cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
 

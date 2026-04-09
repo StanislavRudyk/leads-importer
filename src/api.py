@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import time
+import psutil
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Union
 
@@ -173,22 +174,28 @@ async def trigger_weekly_digest(api_key: str = Depends(get_api_key)):
 async def get_dashboard_metrics():
     """Получение ключевых метрик для дашборда."""
     async with AsyncSessionLocal() as session:
+        # Считаем именно количество уникальных записей в таблице
         total = (await session.execute(select(func.count()).select_from(Lead))).scalar() or 0
+        
         seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
         leads_7d = (await session.execute(
             select(func.count()).select_from(Lead).where(Lead.created_at >= seven_days_ago)
         )).scalar() or 0
+        
         markets = (await session.execute(
             select(func.count(func.distinct(Lead.city))).where(
                 Lead.city.isnot(None), Lead.city != ''
             )
         )).scalar() or 0
+        
         completed = (await session.execute(
             select(func.count()).select_from(Lead).where(Lead.status == 'done')
         )).scalar() or 0
+        
         upcoming = (await session.execute(
             select(func.count()).select_from(Lead).where(Lead.status != 'done')
         )).scalar() or 0
+        
         return {
             'totalLeads': total,
             'leads7d': leads_7d,
@@ -197,17 +204,44 @@ async def get_dashboard_metrics():
             'upcoming': upcoming,
         }
 
+@app.get('/api/v1/dashboard/system-status')
+async def get_system_status():
+    """Получение состояния системы и статистики файлов."""
+    async with AsyncSessionLocal() as session:
+        # Статистика файлов
+        total_files = (await session.execute(select(func.count()).select_from(ImportLog))).scalar() or 0
+        
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        files_today = (await session.execute(
+            select(func.count()).select_from(ImportLog).where(ImportLog.imported_at >= today_start)
+        )).scalar() or 0
+        
+        # Системные метрики
+        cpu = psutil.cpu_percent(interval=None)
+        memory = psutil.virtual_memory()
+        disk = shutil.disk_usage("/")
+        
+        return {
+            'cpu_percent': cpu,
+            'ram_percent': memory.percent,
+            'disk_percent': round((disk.used / disk.total) * 100, 1),
+            'files_total': total_files,
+            'files_today': files_today,
+            'status': 'healthy' if cpu < 90 else 'stressed'
+        }
+
 @app.get('/api/v1/dashboard/overview')
 async def get_dashboard_overview():
     """Получение сводки данных по городам."""
     async with AsyncSessionLocal() as session:
+        # Группируем по городам и считаем количество почт
         query = text("""
             SELECT
                 COALESCE(NULLIF(TRIM(city), ''), 'Unknown') as city,
                 MAX(country_iso2) as country_iso2,
                 MAX(state) as state,
-                COUNT(id) as leads,
-                COUNT(id) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as leads_7d,
+                COUNT(*) as leads,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as leads_7d,
                 MAX(status) as max_status
             FROM leads
             GROUP BY COALESCE(NULLIF(TRIM(city), ''), 'Unknown')
