@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Text,
-    func, text, Index, select, update, BigInteger,
+    func, text, Index, select, update, BigInteger, literal_column,
 )
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY, insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -19,7 +19,14 @@ DATABASE_URL = os.getenv(
     'postgresql+asyncpg://postgres:postgres@localhost:5432/leads',
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_size=5, max_overflow=10)
+engine = create_async_engine(
+    DATABASE_URL, 
+    echo=False, 
+    pool_size=400, 
+    max_overflow=100,
+    pool_timeout=60,
+    pool_pre_ping=True
+)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 class Base(DeclarativeBase):
@@ -108,7 +115,7 @@ async def upsert_leads_batch(
     total_inserted = 0
     total_updated = 0
     total_skipped = 0
-    BATCH_SIZE = 2500
+    BATCH_SIZE = 1000  # Уменьшили для более гладких обновлений в UI
 
     for i in range(0, len(leads_data), BATCH_SIZE):
         chunk = leads_data[i:i + BATCH_SIZE]
@@ -126,8 +133,10 @@ async def upsert_leads_batch(
             if not isinstance(file_date, datetime):
                 file_date = None
 
+            first_name = d.get('first_name')
             raw_phone = d.get('phone')
             phone = str(raw_phone).strip() if raw_phone else None
+            
             values.append({
                 'email': email,
                 'phone': phone,
@@ -155,80 +164,69 @@ async def upsert_leads_batch(
         if not values:
             continue
 
-        emails_in_chunk = [v['email'] for v in values]
+        # Дедупликация внутри пачки + подсчёт потерянных строк
+        unique_values = {}
+        for v in values:
+            unique_values[v['email']] = v
+        dedup_lost = len(values) - len(unique_values)
+        total_skipped += dedup_lost
+        values = list(unique_values.values())
         update_dict = {
             'phone': text(
                 "CASE WHEN EXCLUDED.phone IS NOT NULL AND EXCLUDED.phone != '' "
-                "AND (leads.phone IS NULL OR leads.phone = '' OR EXCLUDED.file_created_at >= COALESCE(leads.file_created_at, '1970-01-01'::timestamptz)) "
                 "THEN EXCLUDED.phone ELSE COALESCE(leads.phone, EXCLUDED.phone) END"
             ),
             'phones': text(
-                "(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM ( "
-                "SELECT jsonb_array_elements(COALESCE(leads.phones, '[]'::jsonb)) AS elem "
-                "UNION SELECT jsonb_array_elements(COALESCE(EXCLUDED.phones, '[]'::jsonb)) AS elem "
-                ") sub WHERE elem IS NOT NULL AND elem != 'null'::jsonb AND elem != '\"\"'::jsonb)"
+                "COALESCE(leads.phones, '[]'::jsonb) || COALESCE(EXCLUDED.phones, '[]'::jsonb)"
             ),
-            'first_name': text("CASE WHEN leads.first_name IS NOT NULL AND leads.first_name != '' THEN leads.first_name ELSE EXCLUDED.first_name END"),
-            'last_name': text("CASE WHEN leads.last_name IS NOT NULL AND leads.last_name != '' THEN leads.last_name ELSE EXCLUDED.last_name END"),
-            'country_iso2': text("CASE WHEN leads.country_iso2 IS NOT NULL AND leads.country_iso2 != '' THEN leads.country_iso2 ELSE EXCLUDED.country_iso2 END"),
-            'city': text("CASE WHEN leads.city IS NOT NULL AND leads.city != '' THEN leads.city ELSE EXCLUDED.city END"),
-            'state': text("CASE WHEN leads.state IS NOT NULL AND leads.state != '' THEN leads.state ELSE EXCLUDED.state END"),
-            'nationality': text("CASE WHEN leads.nationality IS NOT NULL AND leads.nationality != '' THEN leads.nationality ELSE EXCLUDED.nationality END"),
-            'language': text("CASE WHEN leads.language IS NOT NULL AND leads.language != '' THEN leads.language ELSE EXCLUDED.language END"),
+            'first_name': text("COALESCE(NULLIF(leads.first_name, ''), EXCLUDED.first_name)"),
+            'last_name': text("COALESCE(NULLIF(leads.last_name, ''), EXCLUDED.last_name)"),
+            'country_iso2': text("COALESCE(NULLIF(leads.country_iso2, ''), EXCLUDED.country_iso2)"),
+            'city': text("COALESCE(NULLIF(leads.city, ''), EXCLUDED.city)"),
+            'state': text("COALESCE(NULLIF(leads.state, ''), EXCLUDED.state)"),
+            'nationality': text("COALESCE(NULLIF(leads.nationality, ''), EXCLUDED.nationality)"),
+            'language': text("COALESCE(NULLIF(leads.language, ''), EXCLUDED.language)"),
             'source': text("COALESCE(leads.source, EXCLUDED.source)"),
             'latest_source': text("EXCLUDED.latest_source"),
-            'latest_campaign': text("CASE WHEN EXCLUDED.latest_campaign IS NOT NULL AND EXCLUDED.latest_campaign != '' THEN EXCLUDED.latest_campaign ELSE COALESCE(leads.latest_campaign, EXCLUDED.latest_campaign) END"),
+            'latest_campaign': text("COALESCE(NULLIF(EXCLUDED.latest_campaign, ''), leads.latest_campaign)"),
             'is_buyer': text("leads.is_buyer OR EXCLUDED.is_buyer"),
             'tags': text(
-                "(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM ( "
-                "SELECT jsonb_array_elements(COALESCE(leads.tags, '[]'::jsonb)) AS elem "
-                "UNION SELECT jsonb_array_elements(COALESCE(EXCLUDED.tags, '[]'::jsonb)) AS elem "
-                ") sub WHERE elem IS NOT NULL AND elem != 'null'::jsonb)"
+                "COALESCE(leads.tags, '[]'::jsonb) || COALESCE(EXCLUDED.tags, '[]'::jsonb)"
             ),
-            'status': text("CASE WHEN leads.status IN ('contacted', 'qualified', 'negotiation', 'won', 'lost', 'archived') THEN leads.status ELSE COALESCE(EXCLUDED.status, leads.status) END"),
+            'status': text("CASE WHEN leads.status IN ('contacted', 'qualified', 'won', 'lost') THEN leads.status ELSE EXCLUDED.status END"),
             'meta_info': text(
-                "jsonb_build_object('import_history', COALESCE(leads.meta_info->'import_history', '[]'::jsonb) || COALESCE(EXCLUDED.meta_info->'import_history', '[]'::jsonb), "
-                "'raw_phones', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM ( "
-                "SELECT jsonb_array_elements(COALESCE(leads.meta_info->'raw_phones', '[]'::jsonb)) AS elem "
-                "UNION SELECT jsonb_array_elements(COALESCE(EXCLUDED.meta_info->'raw_phones', '[]'::jsonb)) AS elem "
-                ") sub WHERE elem IS NOT NULL AND elem != 'null'::jsonb))"
+                "leads.meta_info || jsonb_build_object("
+                "'import_history', CASE WHEN jsonb_array_length(COALESCE(leads.meta_info->'import_history', '[]'::jsonb)) < 5 "
+                "THEN COALESCE(leads.meta_info->'import_history', '[]'::jsonb) || EXCLUDED.meta_info->'import_history' "
+                "ELSE EXCLUDED.meta_info->'import_history' END)"
             ),
-            'file_created_at': text("GREATEST(COALESCE(leads.file_created_at, EXCLUDED.file_created_at), COALESCE(EXCLUDED.file_created_at, leads.file_created_at))"),
-            'import_count': text("COALESCE(leads.import_count, 0) + 1"),
+            'file_created_at': text("GREATEST(COALESCE(leads.file_created_at, '1970-01-01'::timestamp), COALESCE(EXCLUDED.file_created_at, '1970-01-01'::timestamp))"),
+            'import_count': Lead.import_count + 1,
             'updated_at': text("NOW()"),
         }
 
         try:
-            existing_result = await session.execute(
-                select(Lead.email).where(Lead.email.in_(emails_in_chunk))
-            )
-            existing_emails = {row[0] for row in existing_result.fetchall()}
             stmt = pg_insert(Lead).values(values)
-
             upsert_stmt = stmt.on_conflict_do_update(
                 index_elements=['email'],
                 set_=update_dict,
-            )
-            await session.execute(upsert_stmt)
+            ).returning(literal_column("(xmax = 0)").label("was_inserted"))
+            
+            result = await session.execute(upsert_stmt)
+            rows = result.fetchall()
+            
+            batch_inserted = sum(1 for r in rows if r.was_inserted)
+            total_inserted += batch_inserted
+            total_updated += (len(rows) - batch_inserted)
+            
+            # Коммитим каждую пачку отдельно для освобождения локов
             await session.commit()
-            total_inserted += len([e for e in emails_in_chunk if e not in existing_emails])
-            total_updated += len([e for e in emails_in_chunk if e in existing_emails])
+            
         except Exception as e:
             await session.rollback()
-            logger.error(f'UPSERT batch failure, falling back to single inserts. Error: {e}')
-
-            total_skipped += len(chunk)
-            for val in values:
-                try:
-                    single_stmt = pg_insert(Lead).values([val]).on_conflict_do_update(index_elements=['email'], set_=update_dict)
-                    await session.execute(single_stmt)
-                    await session.commit()
-                    total_skipped -= 1
-                    if val['email'] in existing_emails: total_updated += 1
-                    else: total_inserted += 1
-                except Exception as single_err:
-                    await session.rollback()
-                    logger.warning(f"Failed to insert single lead {val.get('email')}: {single_err}")
+            logger.error(f'UPSERT batch failure [{source_name}]: {e}')
+            total_skipped += len(values)
+            
     return (total_inserted, total_updated, total_skipped)
 
 async def create_import_log(session: AsyncSession,filename, source, total, inserted, updated, skipped, status='success', error_details=None):
@@ -247,6 +245,19 @@ async def create_import_log(session: AsyncSession,filename, source, total, inser
     await session.commit()
     await session.refresh(log)
     return log.id
+
+
+async def check_file_imported(filename: str) -> bool:
+    """Проверка, был ли файл уже успешно импортирован."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ImportLog.id).where(
+                ImportLog.filename == filename,
+                ImportLog.status.in_(['success', 'partial'])
+            ).limit(1)
+        )
+        return result.scalar() is not None
+
 
 async def get_weekly_stats(session: AsyncSession) -> Dict[str, Any]:
     """Получение статистики для еженедельного дайджеста."""

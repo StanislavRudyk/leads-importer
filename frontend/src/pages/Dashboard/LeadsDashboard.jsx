@@ -21,6 +21,11 @@ const LeadsDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState(null);
+  const [activeTasks, setActiveTasks] = useState([]);
+  const [activeCount, setActiveCount] = useState(0);
+  const [showQueue, setShowQueue] = useState(false);
+  const folderInputRef = React.useRef(null);
+  const fileInputRef = React.useRef(null);
 
   const [data, setData] = useState([]);
   const [search, setSearch] = useState('');
@@ -57,8 +62,20 @@ const LeadsDashboard = () => {
         const d = await r.json();
         setImportData(Array.isArray(d) ? d : []);
       }
+
+      // Fetch active tasks
+      const activeR = await fetch(`${API_BASE}/api/v1/import/active`);
+      if (activeR.ok) {
+        const activeD = await activeR.json();
+        setActiveTasks(activeD.tasks || []);
+        setActiveCount(activeD.count || 0);
+      }
     } catch (e) {
       console.error("Fetch error:", e);
+      // Если сервер не отвечает, показываем понятную ошибку вместо пустого экрана
+      if (message === null) {
+          setMessage({ text: "Server Busy. Re-syncing in 5s...", type: "error" });
+      }
     }
     if (!isBackground) setLoading(false);
   };
@@ -145,11 +162,16 @@ const LeadsDashboard = () => {
 
     setMessage({ text: `Starting parallel upload of ${files.length} files...`, type: "info" });
     
-    // Execute pool
+    // Execute pool with thundering herd prevention
     const queue = [...files];
     const workers = Array(Math.min(concurrencyLimit, queue.length)).fill(null).map(async () => {
         while (queue.length > 0) {
-            await processFile(queue.shift());
+            const nextFile = queue.shift();
+            if (nextFile) {
+                await processFile(nextFile);
+                // Throttling to prevent slamming the server
+                await new Promise(r => setTimeout(r, 100)); 
+            }
         }
     });
 
@@ -224,7 +246,7 @@ const LeadsDashboard = () => {
         <div className="mc am"><div className="mlb">+7d Leads</div><div className="mv">{tab1Stats.t7>0?'+':''}{fmt(tab1Stats.t7)}</div><div className="ms">last 7 days</div></div>
         <div className="mc"><div className="mlb">Datapoints</div><div className="mv">{viewMode==='city'?tab1Stats.m:tab1Stats.m+' / '+tab1Stats.rawCities}</div><div className="ms">{viewMode==='city'?'unique cities':'countries / cities'}</div></div>
         <div className="mc g"><div className="mlb">Completed</div><div className="mv">{tab1Stats.doneC}</div><div className="ms">status: done</div></div>
-        <div className="mc"><div className="mlb">Upcoming</div><div className="mv">{tab1Stats.m - tab1Stats.doneC}</div><div className="ms">status: new</div></div>
+        <div className="mc"><div className="mlb">Upcoming</div><div className="mv">{fmt(tab1Stats.tL - tab1Stats.doneC)}</div><div className="ms">status: new</div></div>
       </div>
 
 
@@ -288,7 +310,27 @@ const LeadsDashboard = () => {
         <table>
           <thead><tr><th>Log #</th><th>Timestamp</th><th>Import Context</th><th style={{textAlign: 'right'}}>Total Scan</th><th style={{textAlign: 'right', color:'#34d399'}}>Inserted (+New)</th><th style={{textAlign: 'right', color:'#fbbf24'}}>Updated (Merge)</th><th style={{textAlign: 'right', color:'#ef4444'}}>Skipped (Dups/Err)</th></tr></thead>
           <tbody>
-            {importData.length === 0 ? <tr><td colSpan="7" className="empty">No import activity logged yet.</td></tr> : importData.map(d => (<tr key={d.id}><td style={{fontFamily:'var(--mo)', color:'#9ca3af', fontSize:'11px'}}>#{String(d.id).padStart(4, '0')}</td><td style={{fontFamily:'var(--mo)', fontSize:'12px', color:'#d1d5db'}}>{d.created_at}</td><td><div style={{color:'#e5e7eb', fontWeight:500}}>{d.filename}</div><div style={{color:'#6b7280', fontSize:'11px', marginTop:'2px'}}>Via: {d.source}</div></td><td style={{fontFamily:'var(--mo)', textAlign: 'right', color:'#f3f4f6'}}>{fmt(d.total_rows)}</td><td style={{fontFamily:'var(--mo)', color:'#34d399', textAlign: 'right', fontWeight: d.inserted > 0 ? 600 : 400}}>{fmt(d.inserted)}</td><td style={{fontFamily:'var(--mo)', color:'#fbbf24', textAlign: 'right', fontWeight: d.updated > 0 ? 600 : 400}}>{fmt(d.updated)}</td><td style={{fontFamily:'var(--mo)', color:'#ef4444', textAlign: 'right', fontWeight: d.skipped > 0 ? 600 : 400}}>{fmt(d.skipped)}</td></tr>))}
+            {importData.length === 0 ? <tr><td colSpan="7" className="empty">No import activity logged yet.</td></tr> : importData.map(d => {
+              const rowStatus = d.status === 'error' ? 'failed' : (d.status === 'skipped' ? 'skipped' : 'success');
+              const statusColor = { 'success': '#34d399', 'skipped': '#94a3b8', 'failed': '#ef4444' }[rowStatus];
+              return (
+                <tr key={d.id} style={{ opacity: rowStatus === 'skipped' ? 0.7 : 1 }}>
+                  <td style={{fontFamily:'var(--mo)', color:'#9ca3af', fontSize:'11px'}}>#{String(d.id).padStart(4, '0')}</td>
+                  <td style={{fontFamily:'var(--mo)', fontSize:'12px', color:'#d1d5db'}}>{d.created_at}</td>
+                  <td>
+                    <div style={{color:'#e5e7eb', fontWeight:500}}>{d.filename}</div>
+                    <div style={{color:'#6b7280', fontSize:'11px', marginTop:'2px'}}>Via: {d.source}</div>
+                  </td>
+                  <td style={{fontFamily:'var(--mo)', textAlign: 'right', color:'#f3f4f6'}}>{fmt(d.total_rows)}</td>
+                  <td style={{fontFamily:'var(--mo)', color:'#34d399', textAlign: 'right', fontWeight: d.inserted > 0 ? 600 : 400}}>{fmt(d.inserted)}</td>
+                  <td style={{fontFamily:'var(--mo)', color:'#fbbf24', textAlign: 'right', fontWeight: d.updated > 0 ? 600 : 400}}>{fmt(d.updated)}</td>
+                  <td style={{fontFamily:'var(--mo)', color: statusColor, textAlign: 'right', fontWeight: d.skipped > 0 ? 600 : 400}}>
+                    {fmt(d.skipped)}
+                    {rowStatus === 'skipped' && <span style={{fontSize:'9px', marginLeft:'5px'}}>(SYNCHRONIZED)</span>}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -300,10 +342,75 @@ const LeadsDashboard = () => {
       <div className="topbar">
         <div className="logo"><b style={{color: '#fff'}}>LEADS IMPORTER</b> <span style={{color: '#6b7280'}}>• Analytics Core</span></div>
         <div className="hacts">
-          {message && <span style={{marginRight:'15px', fontSize:'12px', color: message.type==='error'?'#ef4444':'#add6ff'}}>{message.text}</span>}
+          {activeCount > 0 && (
+            <div className="active-queue" style={{ position: 'relative', marginRight: '20px' }}>
+              <button 
+                onClick={() => setShowQueue(!showQueue)}
+                style={{ background: '#1e293b', border: '1px solid #334155', color: '#60a5fa', padding: '5px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                <span style={{ width: '8px', height: '8px', background: '#3b82f6', borderRadius: '50%', animation: 'pulse 1.5s infinite' }}></span>
+                Processing {activeCount} {activeCount === 1 ? 'file' : 'files'}
+              </button>
+              {showQueue && (
+                <div className="queue-dropdown" style={{ position: 'absolute', top: '100%', right: 0, marginTop: '8px', background: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px', padding: '12px', width: '280px', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)', zIndex: 100 }}>
+                  <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Server Queue</div>
+                  <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {activeTasks.map(t => (
+                      <div key={t.task_id} style={{ display: 'flex', flexDirection: 'column', gap: '2px', padding: '6px', background: '#1e293b66', borderRadius: '4px' }}>
+                        <div style={{ color: '#e2e8f0', fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.filename}</div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ color: t.status === 'running' ? '#3b82f6' : '#94a3b8', fontSize: '10px', fontWeight: 600 }}>{t.status.replace('_', ' ').toUpperCase()}</span>
+                          <span style={{ color: '#475569', fontSize: '10px' }}>{new Date(t.queued_at).toLocaleTimeString()}</span>
+                        </div>
+                        {t.status === 'running' && (
+                          <div style={{ display: 'flex', gap: '8px', marginTop: '2px', fontSize: '10px' }}>
+                            <span style={{ color: '#34d399' }}>+{t.rows_inserted || 0} New</span>
+                            <span style={{ color: '#fbbf24' }}>~{t.rows_updated || 0} Upd</span>
+                            {t.rows_skipped > 0 && <span style={{ color: '#94a3b8' }}>({t.rows_skipped} skip)</span>}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {message && <span style={{marginRight:'15px', fontSize:'12px', color: message.type==='error'?'#ef4444':'#add6ff', cursor: 'pointer'}} onClick={() => { setImporting(false); setMessage(null); }}>{message.text} ✕</span>}
           <button className="ref-btn" onClick={fetchData} style={{background:'transparent', border:'1px solid #374151', color:'#9ca3af', padding:'5px 12px', borderRadius:'4px', marginRight:'10px', cursor:'pointer'}}>↻ Refresh</button>
-          <label className="ulbl" style={{background:'#10b981', color:'#fff', padding:'5px 15px', borderRadius:'4px', cursor: importing ? 'not-allowed' : 'pointer', fontSize:'13px', fontWeight:600, marginRight:'10px'}}>{importing ? "Processing..." : "Import Folder"}<input type="file" webkitdirectory="" directory="" multiple onChange={handleFolderUpload} disabled={importing} style={{display:'none'}} /></label>
-          <label className="ulbl" style={{background:'#3b82f6', color:'#fff', padding:'5px 15px', borderRadius:'4px', cursor: importing ? 'not-allowed' : 'pointer', fontSize:'13px', fontWeight:600}}>{importing ? "Processing..." : "Import CSV"}<input type="file" onChange={handleFileUpload} disabled={importing} style={{display:'none'}} /></label>
+          
+          <button 
+            className="ulbl" 
+            onClick={() => folderInputRef.current?.click()} 
+            disabled={importing}
+            style={{background:'#10b981', color:'#fff', padding:'5px 15px', border:'none', borderRadius:'4px', cursor: importing ? 'not-allowed' : 'pointer', fontSize:'13px', fontWeight:600, marginRight:'10px'}}
+          >
+            {importing ? "Processing..." : "Import Folder"}
+          </button>
+          <input 
+            type="file" 
+            ref={folderInputRef}
+            webkitdirectory="true" 
+            directory="true" 
+            multiple 
+            onChange={handleFolderUpload} 
+            style={{display:'none'}} 
+          />
+
+          <button 
+            className="ulbl" 
+            onClick={() => fileInputRef.current?.click()} 
+            disabled={importing}
+            style={{background:'#3b82f6', color:'#fff', padding:'5px 15px', border:'none', borderRadius:'4px', cursor: importing ? 'not-allowed' : 'pointer', fontSize:'13px', fontWeight:600}}
+          >
+            {importing ? "Processing..." : "Import CSV"}
+          </button>
+          <input 
+            type="file" 
+            ref={fileInputRef}
+            onChange={handleFileUpload} 
+            style={{display:'none'}} 
+          />
         </div>
       </div>
       <div className="page" style={{ display: 'flex', flex: 1 }}>

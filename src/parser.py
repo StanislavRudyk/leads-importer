@@ -53,7 +53,11 @@ def _read_dataframe(file_path: str) -> Optional[pd.DataFrame]:
     df = None
     try:
         if ext in {'.xlsx', '.xls'}:
-            df = pd.read_excel(file_path, dtype=str, engine='openpyxl' if ext == '.xlsx' else None)
+            # Пробуем максимально быстрый движок calamine, если он установлен
+            try:
+                df = pd.read_excel(file_path, dtype=str, engine='calamine')
+            except Exception:
+                df = pd.read_excel(file_path, dtype=str, engine='openpyxl' if ext == '.xlsx' else None)
         elif ext == '.csv':
             for enc in ENCODINGS_TO_TRY:
                 try:
@@ -74,7 +78,7 @@ def _read_dataframe(file_path: str) -> Optional[pd.DataFrame]:
 
     df = df.reset_index(drop=True)
 
-    # Поиск начала данных (первая строка с email)
+    # Поиск начала данных 
     for idx in range(min(10, len(df))):
         row = df.iloc[idx]
         found_email = False
@@ -107,7 +111,6 @@ def _build_col_map(df: pd.DataFrame, mappings: Dict[str, str]) -> Dict[int, str]
     col_map: Dict[int, str] = {}
     mapped = set()
 
-    # По названиям колонок
     for i, col in enumerate(df.columns):
         key = str(col).strip().lower()
         if key in mappings:
@@ -117,7 +120,6 @@ def _build_col_map(df: pd.DataFrame, mappings: Dict[str, str]) -> Dict[int, str]
     if mapped:
         return col_map
 
-    # По содержимому (первые 30 строк)
     from .city_data import KNOWN_CITIES, COUNTRY_ALIASES
 
     sample = df.head(30)
@@ -143,8 +145,12 @@ def _build_col_map(df: pd.DataFrame, mappings: Dict[str, str]) -> Dict[int, str]
                 continue
 
         if 'city' not in mapped:
-            hits = sum(1 for v in col.head(15) if v.lower() in KNOWN_CITIES)
-            if hits >= min(3, max(1, int(len(col.head(15)) * 0.3))):
+            c_sample = col.head(15)
+            hits = sum(1 for v in c_sample if v.lower() in KNOWN_CITIES)
+            numeric_count = sum(1 for v in c_sample if str(v).strip().isdigit())
+            
+            # Если хитов достаточно и колонка не забита цифрами (ID/Index)
+            if hits >= min(3, max(1, int(len(c_sample) * 0.3))) and numeric_count < (len(c_sample) / 2):
                 col_map[i] = 'city'
                 mapped.add('city')
                 continue
@@ -212,7 +218,6 @@ def parse_file_bulk(file_path: str, source_name: Optional[str] = None) -> List[D
     return results
 
 
-# Обратная совместимость
 async def parse_file(file_path: str, source_name: Optional[str] = None):
     """Совместимость со старым async API — оборачивает bulk."""
     rows = parse_file_bulk(file_path, source_name)

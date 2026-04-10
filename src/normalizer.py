@@ -32,6 +32,29 @@ _EMAIL_RE = re.compile(
 _JUNK_TAIL_RE = re.compile(r'[.;,\s]+$')
 _JUNK_HEAD_RE = re.compile(r'^[.;,\s]+')
 
+_JUNK_EMAIL_PREFIXES = frozenset({
+    'noreply', 'no-reply', 'no.reply', 'donotreply', 'do-not-reply',
+    'do.not.reply', 'mailer-daemon', 'mailer.daemon', 'postmaster',
+    'hostmaster', 'abuse', 'bounce', 'bounces', 'automated',
+    'system', 'daemon', 'devnull', 'null', 'nobody',
+    'info', 'admin', 'sales', 'support', 'contact', 'hello', 
+    'webmaster', 'marketing', 'office', 'service', 'billing', 
+    'orders', 'press', 'jobs', 'careers', 'hr', 'management', 
+    'help', 'inquiries', 'ask', 'finance', 'accounting', 'legal', 
+    'media', 'team', 'events', 'privacy',
+})
+
+_JUNK_EMAIL_DOMAINS = frozenset({
+    'example.com', 'example.org', 'example.net',
+    'test.com', 'test.org', 'test.net', 'localhost',
+    'invalid.com', 'invalid.org',
+    'mailinator.com', 'guerrillamail.com', 'tempmail.com',
+    'throwaway.email', 'sharklasers.com', 'yopmail.com',
+    'trashmail.com', 'fakeinbox.com', 'guerrillamail.net',
+    'grr.la', 'guerrillamailblock.com', 'tempail.com',
+    'dispostable.com', 'maildrop.cc', 'temp-mail.org',
+})
+
 _DATE_PATTERN_1 = re.compile(r'(\d{1,2})[-/_](\d{1,2})[-/_](\d{2,4})')
 _DATE_PATTERN_2 = re.compile(r'(\d{4})[-/_](\d{1,2})[-/_](\d{1,2})')
 _YEAR_RE = re.compile(r'\b(20\d{2})\b')
@@ -64,16 +87,20 @@ def normalize_email(email: object) -> Optional[str]:
     if not email_str or email_str in ('nan', 'none', 'null', 'n/a', ''):
         return None
 
-    # Более надежное извлечение почты из строки (например, "Name <a@b.com>" или "Namea@b.com")
-    # Мы ищем подстроку, которая соответствует формату email
     match = re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', email_str)
     if not match:
         return None
 
     clean_email = match.group(0).replace(' ', '')
 
-    # Дополнительная валидация
     if '..' in clean_email or clean_email.startswith('.') or clean_email.endswith('.'):
+        return None
+
+    # Фильтрация мусорных/системных email
+    local_part, domain = clean_email.rsplit('@', 1)
+    if local_part in _JUNK_EMAIL_PREFIXES:
+        return None
+    if domain in _JUNK_EMAIL_DOMAINS:
         return None
 
     return clean_email
@@ -91,7 +118,6 @@ def normalize_phone(phone: object, default_region: Optional[str] = None) -> Tupl
 
     raw_phone = phone_str
 
-    # Кеш: ключ = сырой телефон + регион
     cache_key = f'{phone_str}|{default_region or ""}'
     if cache_key in _phone_cache:
         return _phone_cache[cache_key]
@@ -209,11 +235,21 @@ def normalize_city(
 
     if lower in KNOWN_CITIES:
         known_country, known_state = KNOWN_CITIES[lower]
-        if country_hint and country_hint != known_country:
-            if lower in AMBIGUOUS_CITIES and country_hint in AMBIGUOUS_CITIES[lower]:
-                city_name, state = AMBIGUOUS_CITIES[lower][country_hint]
-                return (city_name, country_hint, state)
+        # Если город однозначен (не в AMBIGUOUS_CITIES) — верим справочнику больше, чем хинту папки
+        if lower not in AMBIGUOUS_CITIES:
+            return (_title_case_city(lower), known_country, known_state)
+        # Если город неоднозначен (Лондон, Бирмингем) — используем хинт если он совпадает
+        if country_hint and country_hint in AMBIGUOUS_CITIES[lower]:
+            city_name, state = AMBIGUOUS_CITIES[lower][country_hint]
+            return (city_name, country_hint, state)
         return (_title_case_city(lower), known_country, known_state)
+
+    # Эвристика на "мусор": если в названии нет букв или цифр больше, чем букв — это не город (индекс/ID)
+    letters_count = sum(1 for c in lower if c.isalpha())
+    digits_count = sum(1 for c in lower if c.isdigit())
+    
+    if letters_count < 2 or digits_count > letters_count:
+        return (None, None, None)
 
     return (_title_case_city(lower), None, None)
 
@@ -359,12 +395,18 @@ def extract_context_from_path(file_path: str) -> dict:
 
 def _extract_city_from_filename(filename: str) -> Optional[str]:
     """Извлечение названия города из имени файла путём очистки от дат и лишних слов."""
+    # Отрезаем системный хэш-префикс (например, cf19e57d_), если он есть
+    filename = re.sub(r'^[a-fA-F0-9]{8}_', '', filename)
+    
     stem = os.path.splitext(filename)[0]
-    stem = _DATE_PATTERN_1.sub('', stem)
-    stem = _DATE_PATTERN_2.sub('', stem)
-    stem = _YEAR_RE.sub('', stem)
-    stem = re.sub(r'[\s\-–—]+$', '', stem)
-    stem = re.sub(r'^[\s\-–—]+', '', stem).strip()
+    # Более агрессивная чистка дат и чисел (например "Miami 10,000")
+    stem = _DATE_PATTERN_1.sub(' ', stem)
+    stem = _DATE_PATTERN_2.sub(' ', stem)
+    stem = _YEAR_RE.sub(' ', stem)
+    stem = re.sub(r'\d+[,\.]\d+', ' ', stem) # Убираем "10,000"
+    stem = re.sub(r'\d+', ' ', stem) # Убираем любые числа
+    stem = re.sub(r'[\s\-–—_]+$', '', stem)
+    stem = re.sub(r'^[\s\-–—_]+', '', stem).strip()
     if not stem: return None
 
     split_parts = [p.strip() for p in re.split(r'\s*[-–—]\s+|\s+[-–—]\s*|\s*[-–—](?=[A-Z])', stem) if p.strip()]

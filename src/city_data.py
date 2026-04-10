@@ -351,6 +351,10 @@ NOT_CITIES: Set[str] = {
     'n/a', 'na', 'none', 'null', 'unknown', '-', '--', '---', '.', '..', 'nan',
     'test', 'testing', 'asdf', 'xxx', 'other', 'general', 'various',
     'florida general', 'florida', 'california', 'texas', 'new york state',
+    'platinumlist', 'eventbrite', 'ticketing', 'mailchimp', 'stripe', 'crm',
+    'industry', 'only', 'list', 'export', 'contacts', 'members', 'report',
+    'xls', 'xlsx', 'csv', 'excel', 'subscribed', 'members', 'export',
+    'pt', 'york', 'raw', 'peyman', 'batch', 'members', 'members',
 }
 
 COUNTRY_ALIASES: Dict[str, str] = {
@@ -403,7 +407,10 @@ FILENAME_NOISE: Set[str] = {
     'show', 'shows', 'english', 'en', 'e', 'f', 'form',
     '2nd', '3rd', '4th', '5th', '1st', 'early', 'sales',
     'patrons', 'patron', 'prime', 'unholy', 'sheep',
-    'audience', 'mwma', 'ibt', 'hz', 'got',
+    'audience', 'mwma', 'ibt', 'hz', 'got', '10,000', '9,000', '8,000', '5,000',
+    '2024', '2023', '2022', '2021', '2020', '2019', '2018', '2017', '2016', '2015',
+    'pt1', 'pt2', 'pt3', 'part', 'presales', 'pre-sales', 'report', 'export',
+    'cleaned', 'deliverable', 'risky', 'unknown', 'members',
 }
 
 FILENAME_LANGUAGES: Set[str] = {

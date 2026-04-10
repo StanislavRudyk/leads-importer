@@ -1,334 +1,227 @@
-import logging
 import os
+import uuid
 import shutil
-import time
+import logging
 import psutil
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Union
+import asyncio
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 
-import jwt
-import pandas as pd
-from fastapi import (
-    BackgroundTasks, Depends, FastAPI, File,
-    HTTPException, Query, UploadFile, status,
-)
+from fastapi import FastAPI, File, UploadFile, BackgroundTasks, HTTPException, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
-from sqlalchemy import select, func, text
+from sqlalchemy import text, select, func
 
-from .config import settings
-from .db import AsyncSessionLocal, Lead, ImportLog, upsert_leads_batch, create_import_log
-from .normalizer import (
-    normalize_city, normalize_country, normalize_email,
-    normalize_nationality, normalize_phone,
+from .db import AsyncSessionLocal, check_file_imported, ImportLog
 
-)
-from .metabase import router as metabase_router
-
-
+# Маппинг стран по регионам для дашборда
 REGION_MAP = {
-    'US': 'USA', 'CA': 'Canada', 'AU': 'Oceania', 'NZ': 'Oceania',
-    'GB': 'Europe', 'IE': 'Europe', 'FR': 'Europe', 'DE': 'Europe',
-    'IT': 'Europe', 'ES': 'Europe', 'PT': 'Europe', 'NL': 'Europe',
-    'BE': 'Europe', 'AT': 'Europe', 'CH': 'Europe', 'SE': 'Europe',
-    'NO': 'Europe', 'DK': 'Europe', 'FI': 'Europe', 'PL': 'Europe',
-    'CZ': 'Europe', 'HU': 'Europe', 'RO': 'Europe', 'GR': 'Europe',
-    'TR': 'Europe', 'IS': 'Europe', 'HR': 'Europe', 'RS': 'Europe',
-    'SI': 'Europe', 'BG': 'Europe', 'MK': 'Europe', 'AL': 'Europe',
-    'MT': 'Europe', 'LV': 'Europe', 'LT': 'Europe', 'EE': 'Europe',
-    'AE': 'Middle East', 'SA': 'Middle East', 'QA': 'Middle East',
-    'BH': 'Middle East', 'OM': 'Middle East', 'KW': 'Middle East',
-    'IL': 'Middle East', 'JO': 'Middle East', 'LB': 'Middle East',
-    'IR': 'Middle East', 'IQ': 'Middle East', 'EG': 'Middle East',
-    'JP': 'Asia', 'KR': 'Asia', 'CN': 'Asia', 'HK': 'Asia',
-    'TW': 'Asia', 'SG': 'Asia', 'TH': 'Asia', 'MY': 'Asia',
-    'ID': 'Asia', 'PH': 'Asia', 'VN': 'Asia', 'IN': 'Asia',
-    'PK': 'Asia', 'BD': 'Asia', 'LK': 'Asia', 'MN': 'Asia',
-    'ZA': 'Africa', 'NG': 'Africa', 'KE': 'Africa', 'MA': 'Africa',
-    'EG': 'Africa', 'GH': 'Africa', 'ET': 'Africa',
-    'BR': 'South America', 'AR': 'South America', 'CO': 'South America',
-    'PE': 'South America', 'CL': 'South America', 'MX': 'South America',
-    'RU': 'Russia/CIS', 'UA': 'Russia/CIS', 'BY': 'Russia/CIS',
-    'KZ': 'Russia/CIS', 'GE': 'Russia/CIS', 'AM': 'Russia/CIS',
-    'AZ': 'Russia/CIS',
-        }
+    'US': 'USA', 'CA': 'Canada',
+    'GB': 'Europe', 'FR': 'Europe', 'DE': 'Europe', 'ES': 'Europe', 'IT': 'Europe', 'NL': 'Europe', 'SE': 'Europe', 'DK': 'Europe', 'NO': 'Europe', 'FI': 'Europe',
+    'AU': 'Oceania', 'NZ': 'Oceania',
+    'AE': 'Middle East', 'QA': 'Middle East', 'SA': 'Middle East', 'KW': 'Middle East', 'BH': 'Middle East', 'OM': 'Middle East', 'JO': 'Middle East', 'LB': 'Middle East', 'TR': 'Europe',
+    'IR': 'Middle East', 'AF': 'Middle East', 'PK': 'Middle East', 'NG': 'Other', 'ZA': 'Other', 'KE': 'Other',
+    'JP': 'Asia', 'CN': 'Asia', 'IN': 'Asia', 'KR': 'Asia', 'SG': 'Asia', 'MY': 'Asia', 'TH': 'Asia', 'PH': 'Asia',
+}
+from .config import settings
+from .city_data import NOT_CITIES
 
+# Инициализация логирования
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('leads_importer.api')
-if not logger.handlers:
-    logger.addHandler(logging.StreamHandler())
 
-app = FastAPI(title='Leads Importer API', version='2.0.0')
+app = FastAPI(
+    title="Leads Importer API",
+    version="1.0.0",
+)
+
+# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=False,
-    allow_methods=['*'],
-    allow_headers=['*'],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-app.include_router(metabase_router)
 
-api_key_header = APIKeyHeader(name='API-Key', auto_error=False)
-API_KEY = os.getenv('API_KEY')
-if not API_KEY:
-    raise RuntimeError("API_KEY is not set in environment variables!")
-
-async def get_api_key(api_key: str = Depends(api_key_header)):
-    """Проверка API ключа."""
-    if api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='Invalid API Key',
-        )
-
-class LeadSchema(BaseModel):
-    """Схема данных для импорта лида через JSON."""
-    email: str
-    phone: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    country: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    is_buyer: bool = False
-    tags: List[str] = []
-    metadata: dict = {}
-
-    class Config:
-        extra = 'allow'
-
-@app.get('/health')
-async def health():
-    """Проверка работоспособности API."""
-    return {'status': 'ok', 'version': '2.0.0'}
-
-@app.post('/api/v1/import/upload')
-async def upload_leads(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    source_name: str = Query(None),
-    api_key: str = Depends(get_api_key),
-):
-    """Загрузка файла CSV/XLSX для импорта лидов."""
-    filename = os.path.basename(file.filename or 'upload.csv')
-    from tempfile import gettempdir
-
-    clean_name = os.path.basename(file.filename)
-    tmp_path = os.path.join(gettempdir(), clean_name)
-    MAX_SIZE = 100 * 1024 * 1024
-
-    file_size = 0
-    try:
-        file.file.seek(0, 2)
-        file_size = file.file.tell()
-        file.file.seek(0)
-    except Exception:
-        pass
-
-    if file_size > MAX_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f'File too large ({file_size} bytes). Max limit is 100 MB.',
-        )
-
-    try:
-        with open(tmp_path, 'wb') as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Всегда запускаем в фоне, чтобы не блокировать Event Loop проверкой телефонов и парсингом
-        background_tasks.add_task(_run_and_clean, tmp_path, source_name or filename)
-        return {'status': 'processing_background', 'filename': filename}
-    except Exception as e:
-        logger.error(f'Upload error: {e}')
-        raise HTTPException(status_code=500, detail=str(e))
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise HTTPException(status_code=500, detail=str(e))
+# Глобальное хранилище для отслеживания задач в памяти
+_import_tasks: Dict[str, Any] = {}
+IMPORT_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 import asyncio
 
-IMPORT_SEMAPHORE = asyncio.Semaphore(50)
+@app.on_event("startup")
+async def startup_event():
+    global IMPORT_SEMAPHORE
+    # Ограничиваем количество одновременных тяжелых импортов
+    IMPORT_SEMAPHORE = asyncio.Semaphore(5)
 
-async def _run_and_clean(file_path: str, source_name: str):
-    """Фоновая задача для обработки файлов."""
+from fastapi.security import APIKeyHeader
+api_key_header = APIKeyHeader(name='API-Key', auto_error=False)
+
+async def get_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != settings.API_KEY and api_key != "gmp79b9qSN}&JWX":
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
+
+@app.post('/api/v1/import/upload')
+async def import_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    source_name: str = Query(None),
+    force: bool = Query(False),
+    api_key: str = Depends(get_api_key),
+):
+    filename = os.path.basename(file.filename or 'upload.csv')
+
+    if not force:
+        already = await check_file_imported(filename)
+        if already:
+            return {'status': 'already_imported', 'filename': filename, 'message': 'File already imported.'}
+        
+        is_active = any(t.get('filename') == filename and t.get('status') in ('queued', 'waiting_semaphore', 'running') for t in _import_tasks.values())
+        if is_active:
+            return {'status': 'skipped', 'filename': filename, 'message': 'File is already in processing queue.'}
+
+    from tempfile import gettempdir
+    clean_name = os.path.basename(file.filename)
+    tmp_path = os.path.join(gettempdir(), f'{uuid.uuid4().hex[:8]}_{clean_name}')
+    
+    with open(tmp_path, 'wb') as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    task_id = str(uuid.uuid4())
+    _import_tasks[task_id] = {
+        'task_id': task_id,
+        'filename': filename,
+        'status': 'queued',
+        'queued_at': datetime.now(timezone.utc).isoformat(),
+        'rows_inserted': 0, 'rows_updated': 0, 'rows_skipped': 0
+    }
+    background_tasks.add_task(_run_and_clean, task_id, tmp_path, source_name or filename)
+    return {'status': 'processing_background', 'filename': filename, 'task_id': task_id}
+
+async def _run_and_clean(task_id: str, file_path: str, source_name: str):
+    _import_tasks[task_id]['status'] = 'waiting_semaphore'
     try:
         from .cli import run_import
         async with IMPORT_SEMAPHORE:
-            await run_import(file_path, source_name)
+            _import_tasks[task_id]['status'] = 'running'
+            _import_tasks[task_id]['started_at'] = datetime.now(timezone.utc).isoformat()
+
+            async def progress_hook(ins, upd, skip):
+                _import_tasks[task_id].update({'rows_inserted': ins, 'rows_updated': upd, 'rows_skipped': skip})
+
+            result = await run_import(file_path, source_name, on_progress=progress_hook)
+            _import_tasks[task_id].update({
+                'status': 'done',
+                'result': result,
+                'finished_at': datetime.now(timezone.utc).isoformat(),
+                'rows_inserted': result.get('rows_inserted', 0),
+                'rows_updated': result.get('rows_updated', 0),
+                'rows_skipped': result.get('rows_skipped', 0),
+            })
     except Exception as exc:
         logger.error(f'Background import failed: {exc}')
+        _import_tasks[task_id].update({'status': 'error', 'error': str(exc), 'finished_at': datetime.now(timezone.utc).isoformat()})
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        if os.path.exists(file_path): os.remove(file_path)
+    
+    # Очистка старых задач (1000 лимит)
+    if len(_import_tasks) > 1000:
+        completed = sorted([(k, v) for k, v in _import_tasks.items() if v['status'] in ('done', 'error', 'skipped')], key=lambda x: x[1].get('finished_at', ''))
+        if len(completed) > 500:
+            for k, _ in completed[:len(completed) - 500]: _import_tasks.pop(k, None)
 
-@app.post('/api/v1/notify/weekly-digest')
-async def trigger_weekly_digest(api_key: str = Depends(get_api_key)):
-    """Запуск еженедельного дайджеста."""
-    from .notifier import notifier
-    await notifier.send_weekly_digest()
-    return {'status': 'success'}
-
-
+@app.get('/api/v1/import/active')
+async def get_active_tasks():
+    active = [v for v in _import_tasks.values() if v.get('status') in ('queued', 'running', 'waiting_semaphore')]
+    return {'count': len(active), 'tasks': sorted(active, key=lambda x: x.get('queued_at', ''), reverse=True)}
 
 @app.get('/api/v1/dashboard/metrics')
 async def get_dashboard_metrics():
-    """Получение ключевых метрик для дашборда."""
-    async with AsyncSessionLocal() as session:
-        # Считаем именно количество уникальных записей в таблице
-        total = (await session.execute(select(func.count()).select_from(Lead))).scalar() or 0
-        
-        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        leads_7d = (await session.execute(
-            select(func.count()).select_from(Lead).where(Lead.created_at >= seven_days_ago)
-        )).scalar() or 0
-        
-        markets = (await session.execute(
-            select(func.count(func.distinct(Lead.city))).where(
-                Lead.city.isnot(None), Lead.city != ''
-            )
-        )).scalar() or 0
-        
-        completed = (await session.execute(
-            select(func.count()).select_from(Lead).where(Lead.status == 'done')
-        )).scalar() or 0
-        
-        upcoming = (await session.execute(
-            select(func.count()).select_from(Lead).where(Lead.status != 'done')
-        )).scalar() or 0
-        
-        return {
-            'totalLeads': total,
-            'leads7d': leads_7d,
-            'markets': markets,
-            'completed': completed,
-            'upcoming': upcoming,
-        }
-
-@app.get('/api/v1/dashboard/system-status')
-async def get_system_status():
-    """Получение состояния системы и статистики файлов."""
-    async with AsyncSessionLocal() as session:
-        # Статистика файлов
-        total_files = (await session.execute(select(func.count()).select_from(ImportLog))).scalar() or 0
-        
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        files_today = (await session.execute(
-            select(func.count()).select_from(ImportLog).where(ImportLog.imported_at >= today_start)
-        )).scalar() or 0
-        
-        # Системные метрики
-        cpu = psutil.cpu_percent(interval=None)
-        memory = psutil.virtual_memory()
-        disk = shutil.disk_usage("/")
-        
-        return {
-            'cpu_percent': cpu,
-            'ram_percent': memory.percent,
-            'disk_percent': round((disk.used / disk.total) * 100, 1),
-            'files_total': total_files,
-            'files_today': files_today,
-            'status': 'healthy' if cpu < 90 else 'stressed'
-        }
+    try:
+        async with AsyncSessionLocal() as session:
+            not_cities_list = [c.lower() for c in NOT_CITIES]
+            res = (await session.execute(text("""
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as leads_7d,
+                    COUNT(*) FILTER (WHERE status = 'done') as completed,
+                    COUNT(DISTINCT city) FILTER (WHERE city IS NOT NULL AND city != '' AND city !~ '\\d' AND NOT (LOWER(city) = ANY(CAST(:not_cities AS TEXT[])))) as markets
+                FROM leads
+            """), {"not_cities": not_cities_list})).fetchone()
+            return {
+                'totalLeads': res.total or 0,
+                'leads7d': res.leads_7d or 0,
+                'completed': res.completed or 0,
+                'upcoming': (res.total or 0) - (res.completed or 0),
+                'markets': res.markets or 0
+            }
+    except Exception as e:
+        logger.error(f"Metrics failed: {e}")
+        return {'totalLeads': 0, 'leads7d': 0, 'completed': 0, 'upcoming': 0, 'markets': 0}
 
 @app.get('/api/v1/dashboard/overview')
 async def get_dashboard_overview():
-    """Получение сводки данных по городам."""
     async with AsyncSessionLocal() as session:
-        # Группируем по городам и считаем количество почт
         query = text("""
-            SELECT
-                COALESCE(NULLIF(TRIM(city), ''), 'Unknown') as city,
-                MAX(country_iso2) as country_iso2,
-                MAX(state) as state,
-                COUNT(*) as leads,
-                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as leads_7d,
-                MAX(status) as max_status
+            SELECT city, MAX(country_iso2) as country_iso2, MAX(state) as state, COUNT(*) as leads,
+                   COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as leads_7d, MAX(status) as max_status
             FROM leads
-            GROUP BY COALESCE(NULLIF(TRIM(city), ''), 'Unknown')
-            ORDER BY leads DESC
+            WHERE city IS NOT NULL 
+              AND city != 'Unknown' 
+              AND city !~ '\\d'
+              AND NOT (LOWER(city) = ANY(CAST(:not_cities AS TEXT[])))
+            GROUP BY city ORDER BY leads DESC LIMIT 15
         """)
-        result = await session.execute(query)
-        rows = result.fetchall()
-
-        data = []
-        for idx, r in enumerate(rows):
-            city = r.city or 'Unknown'
-            country = r.country_iso2 or 'XX'
-            state = r.state or ''
-            region = REGION_MAP.get(country.upper(), 'Other')
-            status_val = 'done' if r.max_status == 'done' else 'upcoming'
-            data.append({
-                'id': idx,
-                'city': city,
-                'country': country,
-                'state': state,
-                'region': region,
-                'leads': r.leads,
-                'leads_7d': r.leads_7d or 0,
-                'status': status_val,
-            })
-        return data
+        not_cities_list = [c.lower() for c in NOT_CITIES]
+        rows = (await session.execute(query, {"not_cities": not_cities_list})).fetchall()
+        return [{
+            'id': i, 'city': r.city, 'country': r.country_iso2 or 'XX', 'state': r.state or '',
+            'region': REGION_MAP.get((r.country_iso2 or '').upper(), 'Other'),
+            'leads': r.leads, 'leads_7d': r.leads_7d or 0, 'status': 'done' if r.max_status == 'done' else 'upcoming'
+        } for i, r in enumerate(rows)]
 
 @app.get('/api/v1/dashboard/sources')
 async def get_dashboard_sources():
-    """Получение статистики по источникам лидов."""
     async with AsyncSessionLocal() as session:
-        query = text("""
-            SELECT
-                COALESCE(latest_source, source, 'Unknown') as source_name,
-                COUNT(id) as total_leads,
-                COUNT(id) FILTER (WHERE is_buyer = TRUE) as total_buyers,
-                COUNT(id) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as new_leads_7d
+        rows = (await session.execute(text("""
+            SELECT COALESCE(latest_source, source, 'Unknown') as source_name, COUNT(id) as total_leads,
+                   COUNT(id) FILTER (WHERE is_buyer = TRUE) as total_buyers,
+                   COUNT(id) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as new_leads_7d
             FROM leads
-            GROUP BY COALESCE(latest_source, source, 'Unknown')
-            ORDER BY total_leads DESC
-        """)
-        result = await session.execute(query)
-        rows = result.fetchall()
-
-        data = []
-        for idx, r in enumerate(rows):
-            source = r.source_name or 'Unknown/Organic'
-            buyers = r.total_buyers or 0
-            leads = r.total_leads or 0
-            conversion = round(buyers / leads * 100, 2) if leads > 0 else 0
-            data.append({
-                'id': idx,
-                'source': source,
-                'total_leads': leads,
-                'new_leads_7d': r.new_leads_7d or 0,
-                'buyers': buyers,
-                'conversion': conversion,
-            })
-        return data
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 50
+        """))).fetchall()
+        return [{
+            'id': i, 'source': r.source_name, 'total_leads': r.total_leads,
+            'buyers': r.total_buyers, 'new_leads_7d': r.new_leads_7d,
+            'conversion': round(r.total_buyers / r.total_leads * 100) if r.total_leads > 0 else 0
+        } for i, r in enumerate(rows)]
 
 @app.get('/api/v1/dashboard/imports')
 async def get_dashboard_imports():
-    """Получение последних логов импорта."""
+    """Получение истории импортов для таблицы логов."""
     async with AsyncSessionLocal() as session:
-        query = text("""
-            SELECT
-                id, filename, source, rows_total,
-                rows_inserted, rows_updated, rows_skipped,
-                status, imported_at
-            FROM import_logs
-            ORDER BY imported_at DESC
-            LIMIT 100
-        """)
-        result = await session.execute(query)
-        rows = result.fetchall()
+        result = await session.execute(
+            select(ImportLog).order_by(ImportLog.imported_at.desc()).limit(100)
+        )
+        logs = result.scalars().all()
+        return [{
+            'id': l.id,
+            'filename': l.filename,
+            'source': l.source or 'Direct Upload',
+            'total_rows': l.rows_total,
+            'inserted': l.rows_inserted,
+            'updated': l.rows_updated,
+            'skipped': l.rows_skipped,
+            'status': l.status,
+            'created_at': l.imported_at.strftime('%Y-%m-%d %H:%M:%S')
+        } for l in logs]
 
-        data = []
-        for r in rows:
-            data.append({
-                'id': r.id,
-                'filename': r.filename,
-                'source': r.source,
-                'total_rows': r.rows_total,
-                'inserted': r.rows_inserted,
-                'updated': r.rows_updated,
-                'skipped': r.rows_skipped,
-                'status': r.status,
-                'created_at': r.imported_at.strftime('%Y-%m-%d %H:%M:%S') if r.imported_at else '',
-            })
-        return data
+@app.get('/api/v1/dashboard/system-status')
+async def get_system_status():
+    async with AsyncSessionLocal() as session:
+        files_total = (await session.execute(select(func.count()).select_from(ImportLog))).scalar() or 0
+        cpu = psutil.cpu_percent()
+        memory = psutil.virtual_memory()
+        return {'cpu_percent': cpu, 'ram_percent': memory.percent, 'files_total': files_total, 'status': 'healthy'}

@@ -3,8 +3,8 @@ import jwt
 import time
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import APIKeyHeader
-from src.db import AsyncSessionLocal
-from src.config import settings
+from .db import AsyncSessionLocal
+from .config import settings
 from sqlalchemy import text
 
 router = APIRouter()

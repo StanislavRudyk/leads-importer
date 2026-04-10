@@ -49,8 +49,19 @@ class Notifier:
         status = stats.get('status', 'unknown')
         filename = stats.get('filename', 'unknown')
 
-        emoji = '✅' if status == 'success' else ('⚠️' if status == 'partial' else '❌')
-        title = 'Import Complete' if status == 'success' else ('Import Partial' if status == 'partial' else 'Import Failed')
+        emoji = {
+            'success': '✅',
+            'partial': '⚠️',
+            'skipped': 'ℹ️',
+            'error': '❌'
+        }.get(status, '❓')
+        
+        title = {
+            'success': 'Import Complete',
+            'partial': 'Import Partial',
+            'skipped': 'Already Synchronized',
+            'error': 'Import Failed'
+        }.get(status, 'Import Finished')
 
         msg = [
             f'{emoji} <b>{title}</b>',

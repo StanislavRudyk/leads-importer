@@ -36,5 +36,19 @@ def setup_logging ():
 
 if __name__ =="__main__":
     setup_logging ()
-    logging .getLogger ("leads_importer").info ("Starting API server")
-    uvicorn .run ("src.api:app",host ="0.0.0.0",port =8000 ,reload =True )
+    log = logging.getLogger("leads_importer")
+    
+    # Режим воркеров для продакшена (увеличивает параллелизм запросов)
+    workers = int(os.environ.get("WEB_WORKERS", 4))
+    
+    log.info(f"Starting API server with {workers} workers")
+    
+    # В проде reload должен быть False для стабильности
+    # reload can't be used with workers > 1
+    uvicorn.run(
+        "src.api:app",
+        host="0.0.0.0",
+        port=8000,
+        workers=workers,
+        reload=False 
+    )

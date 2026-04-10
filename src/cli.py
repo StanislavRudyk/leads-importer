@@ -6,8 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from src.parser import parse_file_bulk
-from src.normalizer import (
+from .parser import parse_file_bulk
+from .normalizer import (
     normalize_email,
     normalize_phone,
     normalize_city,
@@ -17,12 +17,13 @@ from src.normalizer import (
     extract_file_date,
     extract_context_from_path,
 )
-from src.merger import (
+from .merger import (
     merge_lead_fields,
     deduplicate_batch,
     build_import_history_entry,
 )
-from src.db import AsyncSessionLocal, upsert_leads_batch, create_import_log
+from .db import AsyncSessionLocal, upsert_leads_batch, create_import_log
+from .city_data import NOT_CITIES
 
 logger = logging.getLogger('leads_importer.cli')
 
@@ -49,23 +50,33 @@ def _normalize_row(raw_row: Dict[str, Any], source_name: str) -> Optional[Dict[s
     raw_city = raw_row.get('city') or file_context.get('folder_city')
     city_name, city_country, city_state = normalize_city(raw_city, country_hint=country_iso2 or country_hint, state_hint=state_hint)
 
-    # Фоллбек: попытка найти город в сырых данных
+    # Фоллбек
     if not city_name:
         raw_meta = raw_row.get('_raw_meta', {})
         for v in raw_meta.values():
             candidate = str(v).strip()
-            if 3 <= len(candidate) <= 50 and '@' not in candidate and not candidate.isdigit():
-                test_city, test_country, test_state = normalize_city(candidate, country_hint=country_iso2)
-                if test_city and test_country:
-                    city_name, city_country, city_state = test_city, test_country, test_state
-                    break
+            # Очень жесткая проверка для фоллбека
+            if 3 <= len(candidate) <= 35 and '@' not in candidate:
+                c_lets = sum(1 for c in candidate if c.isalpha())
+                c_digs = sum(1 for c in candidate if c.isdigit())
+                if c_lets >= 3 and c_digs == 0:
+                    cand_lower = candidate.lower()
+                    if cand_lower not in NOT_CITIES:
+                        test_city, test_country, test_state = normalize_city(candidate, country_hint=country_iso2)
+                        if test_city and test_country:
+                            city_name, city_country, city_state = test_city, test_country, test_state
+                            break
+    
+    # Финальная проверка на мусор
+    if city_name and (city_name.lower() in NOT_CITIES or any(c.isdigit() for c in city_name)):
+        city_name = None
 
     if not country_iso2 and city_country:
         country_iso2 = city_country
 
     state = normalize_state(state=raw_row.get('state'), city=city_name, country=country_iso2) or city_state or state_hint
 
-    # Телефон: быстрая проверка перед тяжёлым парсингом
+    # Телефон
     raw_phone = raw_row.get('phone')
     phone_e164, raw_phone_str = None, None
     if raw_phone:
@@ -130,19 +141,22 @@ def _parse_tags(value: Any) -> List[str]:
     return [t.strip() for t in s.split(',') if t.strip()]
 
 
-async def run_import(file_path: str, source_name: str = 'default') -> Dict[str, Any]:
+async def run_import(file_path: str, source_name: str = 'default', notify: bool = True, on_progress=None) -> Dict[str, Any]:
     """Быстрый импорт: bulk-парсинг → нормализация → пакетная запись."""
     start_time = time.time()
     if not os.path.exists(file_path):
         return {'status': 'error', 'message': f'File not found', 'duration': 0}
 
-    filename = os.path.basename(file_path)
+    import re
+    # Отрезаем системный хэш-префикс (например, cf19e57d_), если он есть
+    filename = re.sub(r'^[a-fA-F0-9]{8}_', '', os.path.basename(file_path))
+    source_name = re.sub(r'^[a-fA-F0-9]{8}_', '', source_name) if source_name else 'default'
 
-    # 1. Bulk-парсинг 
+    # Bulk-парсинг 
     t0 = time.time()
     import anyio
 
-    # 1. Bulk-парсинг (выносим в поток, так как это CPU-bound синхронная задача)
+    # 1Bulk-парсинг 
     t0 = time.time()
     raw_rows = await anyio.to_thread.run_sync(parse_file_bulk, file_path, source_name)
     parse_time = round(time.time() - t0, 2)
@@ -153,59 +167,71 @@ async def run_import(file_path: str, source_name: str = 'default') -> Dict[str, 
             import_id = await create_import_log(session, filename, source_name, 0, 0, 0, 0, 'empty')
         return {'import_id': import_id, 'filename': filename, 'rows_total': 0, 'rows_inserted': 0, 'rows_updated': 0, 'rows_skipped': 0, 'status': 'empty', 'duration': round(time.time() - start_time, 2)}
 
-    # 2. Bulk-нормализация (выносим в поток)
-    t0 = time.time()
-    def _bulk_norm(rows, src):
-        out = []
-        skipped = 0
-        for i, r in enumerate(rows):
-            n = _normalize_row(r, src)
-            if n: out.append(n)
-            else: skipped += 1
-            # Forcibly yield the GIL every 500 records so FastAPI can serve requests
-            if i % 500 == 0:
-                time.sleep(0.001)
-        return out, skipped
-
-    normalized, skipped_normalize = await anyio.to_thread.run_sync(_bulk_norm, raw_rows, source_name)
-    norm_time = round(time.time() - t0, 2)
-
-    # 3. Пакетная запись в БД (одна сессия для upsert + import_log)
-    t0 = time.time()
+    # Потоковая (батчевая) обработка для скорости и экономии памяти
+    t_bulk = time.time()
     total_inserted, total_updated, total_skipped_db = 0, 0, 0
-
+    total_skipped_norm = 0
+    
+    CHUNK_SIZE = 1000 # Более мелкие чанки для частого обновления UI
+    
     async with AsyncSessionLocal() as session:
-        try:
-            deduped = deduplicate_batch(normalized)
-            total_inserted, total_updated, total_skipped_db = await upsert_leads_batch(session, deduped, source_name)
-        except Exception as exc:
-            logger.error(f'DB error [{filename}]: {exc}')
-            import_id = await create_import_log(session, filename, source_name, total_parsed, 0, 0, total_parsed, 'failed', {'error': str(exc)})
-            return {'import_id': import_id, 'status': 'error', 'message': str(exc), 'duration': round(time.time() - start_time, 2)}
+        for i in range(0, total_parsed, CHUNK_SIZE):
+            chunk_raw = raw_rows[i:i + CHUNK_SIZE]
+            
+            # Нормализация пачки
+            normalized_chunk = []
+            for r in chunk_raw:
+                n = _normalize_row(r, source_name)
+                if n: normalized_chunk.append(n)
+                else: total_skipped_norm += 1
+            
+            if not normalized_chunk:
+                continue
+                
+            # Запись пачки
+            try:
+                ins, upd, skip = await _flush_batch(session, normalized_chunk, source_name)
+                total_inserted += ins
+                total_updated += upd
+                total_skipped_db += skip
+                
+                if on_progress:
+                    await on_progress(total_inserted, total_updated, total_skipped_norm + total_skipped_db)
+            except Exception as exc:
+                logger.error(f'Batch error at index {i} [{filename}]: {exc}')
 
-        db_time = round(time.time() - t0, 2)
-        duration = round(time.time() - start_time, 2)
-        total_skipped = skipped_normalize + total_skipped_db
+    db_time = round(time.time() - t_bulk, 2)
+    duration = round(time.time() - start_time, 2)
+    total_skipped = total_skipped_norm + total_skipped_db
 
+    if total_parsed > 0 and total_inserted + total_updated == 0:
+        status = 'skipped'
+    else:
         status = 'failed' if total_inserted + total_updated == 0 and total_parsed > 0 else ('partial' if total_skipped > total_parsed * 0.5 else 'success')
-
+    
+    async with AsyncSessionLocal() as session:
         import_id = await create_import_log(session, filename, source_name, total_parsed, total_inserted, total_updated, total_skipped, status)
-    logger.info(f'{filename}: {total_parsed} rows (parse={parse_time}s, norm={norm_time}s, db={db_time}s) → +{total_inserted} new, ~{total_updated} upd')
+
+    logger.info(f'{filename}: {total_parsed} rows (parse={parse_time}s, total_proc={db_time}s) → +{total_inserted} new, ~{total_updated} upd')
 
     results = {'import_id': import_id, 'filename': filename, 'rows_total': total_parsed, 'rows_inserted': total_inserted, 'rows_updated': total_updated, 'rows_skipped': total_skipped, 'status': status, 'duration': duration}
 
-    try:
-        from src.notifier import notifier
-        await notifier.send_import_summary(results)
-    except Exception as exc:
-        logger.error(f'Error sending import summary [{filename}]: {exc}')
+    if notify:
+        try:
+            from .notifier import notifier
+            await notifier.send_import_summary(results)
+        except Exception as exc:
+            logger.error(f'Error sending import summary [{filename}]: {exc}')
     return results
 
 
 async def _flush_batch(session, batch, source_name):
-    """Дедупликация и запись батча."""
+    """Дедупликация и запись батча с учётом потерянных строк."""
+    before_count = len(batch)
     deduped = deduplicate_batch(batch)
-    return await upsert_leads_batch(session, deduped, source_name)
+    dedup_lost = before_count - len(deduped)
+    ins, upd, skip = await upsert_leads_batch(session, deduped, source_name)
+    return (ins, upd, skip + dedup_lost)
 
 
 if __name__ == '__main__':
@@ -218,4 +244,8 @@ if __name__ == '__main__':
     parser.add_argument('--file', required=True)
     parser.add_argument('--source', default=None)
     args = parser.parse_args()
-    asyncio.run(run_import(args.file, args.source or os.path.splitext(os.path.basename(args.file))[0]))
+    import re
+    raw_file = args.file
+    clean_source = args.source or os.path.splitext(os.path.basename(raw_file))[0]
+    clean_source = re.sub(r'^[a-fA-F0-9]{8}_', '', clean_source)
+    asyncio.run(run_import(raw_file, clean_source))
