@@ -11,10 +11,12 @@
   },
   "dependencies": {
     "chart.js": "^4.5.1",
+    "leaflet": "^1.9.4",
     "papaparse": "^5.5.3",
     "react": "^18.2.0",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^18.2.0",
+    "react-leaflet": "^4.2.1",
     "react-router-dom": "^7.13.2"
   },
   "devDependencies": {

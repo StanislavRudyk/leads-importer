@@ -16,7 +16,7 @@ from .config import settings
 logger = logging.getLogger('leads_importer.notifier')
 
 class Notifier:
-    """Класс для управления уведомлениями через Telegram и Email."""
+    """Manager for Telegram and Email notifications."""
 
     def __init__(self) -> None:
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
@@ -31,7 +31,7 @@ class Notifier:
         self.jinja_env = Environment(loader=FileSystemLoader(template_dir))
 
     async def send_telegram(self, message: str) -> None:
-        """Отправка сообщения в Telegram чат."""
+        """Dispatch a message to the configured Telegram chat."""
         if not self.bot_token or not self.chat_id:
             return
 
@@ -45,7 +45,7 @@ class Notifier:
             logger.error(f'Telegram send failed: {e}')
 
     async def send_import_summary(self, stats: Dict[str, Any]) -> None:
-        """Отправка краткого отчета о результатах импорта в Telegram."""
+        """Post a summary report of import results to Telegram."""
         status = stats.get('status', 'unknown')
         filename = stats.get('filename', 'unknown')
 
@@ -79,7 +79,7 @@ class Notifier:
         await self.send_telegram('\n'.join(msg))
 
     async def _send_digest_email(self, recipient_email: str, recipient_name: Optional[str], stats: Dict[str, Any]) -> bool:
-        """Отправка еженедельного отчета на электронную почту."""
+        """Send the weekly digest report via SMTP."""
         if not self.smtp_user or not self.smtp_pass:
             return False
 
@@ -107,26 +107,47 @@ class Notifier:
         return True
 
     def _build_digest_html(self, name: str, stats: Dict[str, Any], date: datetime) -> str:
-        """Сборка HTML-кода письма, если шаблон не найден."""
-        countries = ''.join([f'<li>{c.get("code", "?")} — {c.get("count", 0):,}</li>' for c in stats.get('top_countries', [])])
-        sources = ''.join([f'<li>{s.get("source", "?")} — {s.get("count", 0):,}</li>' for s in stats.get('top_sources', [])])
+        """Fallback HTML generator if the jinja2 template is unavailable."""
+        dq = stats.get('data_quality', {})
+        countries = ''.join([f'<li>{c.get("name", "?")} — {c.get("count", 0):,}</li>' for c in stats.get('top_countries', [])])
+        sources = ''.join([f'<li>{s.get("name", "?")} — {s.get("count", 0):,}</li>' for s in stats.get('top_sources', [])])
+        imp = stats.get('imports', {})
 
         return f"""
         <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2>Weekly Leads Report — {date.strftime('%B %d, %Y')}</h2>
+            <div style="background: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff; text-align: center;">
+                <h2 style="margin:0;">Weekly Leads Report</h2>
+                <p style="color:#666;">{date.strftime('%B %d, %Y')}</p>
+            </div>
             <p>Hi {name},</p>
-            <h3>📊 Database Overview</h3>
-            <p>Total: {stats.get('total_leads', 0):,}<br>New: +{stats.get('new_this_week', 0):,}<br>Updated: +{stats.get('updated_this_week', 0):,}</p>
-            <h3>📈 Data Quality</h3>
-            <p>Phone: {stats.get('with_phone_pct', 0)}% | Name: {stats.get('with_name_pct', 0)}% | City: {stats.get('with_city_pct', 0)}%</p>
-            <h3>🌍 Top Countries</h3><ul>{countries or '<li>No data</li>'}</ul>
-            <h3>📡 Top Sources</h3><ul>{sources or '<li>No data</li>'}</ul>
-            <p>Best regards,<br>Leads Import System</p>
+            <p>Please find below this week's summary of our leads database.</p>
+            
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">📊 DATABASE OVERVIEW</h3>
+            <p>Total: <b>{stats.get('total_leads', 0):,}</b><br>
+               New: <b>+{stats.get('new_this_week', 0):,}</b><br>
+               Updated: <b>+{stats.get('updated_this_week', 0):,}</b></p>
+            
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">📈 DATA QUALITY</h3>
+            <p>Phone: <b>{dq.get('phone_pct', 0)}%</b> | Name: <b>{dq.get('name_pct', 0)}%</b> | Country: <b>{dq.get('country_pct', 0)}%</b> | Buyers: <b>{dq.get('buyer_pct', 0)}%</b></p>
+            
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">🌍 TOP COUNTRIES</h3>
+            <ul>{countries or '<li>No data</li>'}</ul>
+            
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">📡 TOP SOURCES THIS WEEK</h3>
+            <ul>{sources or '<li>No data</li>'}</ul>
+
+            <h3 style="color: #444; border-bottom: 1px solid #ddd;">📦 IMPORTS THIS WEEK</h3>
+            <p>Files processed: <b>{imp.get('processed', 0)}</b><br>
+               Successful: <span style="color:green;"><b>{imp.get('success', 0)}</b></span> | Failed: <span style="color:red;"><b>{imp.get('failed', 0)}</b></span></p>
+
+            <p style="margin-top:30px; border-top: 1px solid #eee; padding-top:10px; font-size:12px; color:#999;">
+                Best regards,<br><b>Antigravity AI System</b>
+            </p>
         </body></html>
         """
 
     async def send_weekly_digest(self) -> None:
-        """Рассылка еженедельного дайджеста всем активным получателям."""
+        """Orchestrate the delivery of the weekly digest to all active recipients."""
         async with AsyncSessionLocal() as session:
             stats = await get_weekly_stats(session)
             res = await session.execute(select(DigestRecipient).where(DigestRecipient.is_active.is_(True)))

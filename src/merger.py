@@ -5,7 +5,7 @@ import logging
 logger = logging.getLogger('leads_importer.merger')
 
 def _is_empty(value: Any) -> bool:
-    """Проверка, является ли значение пустым или невалидным."""
+    """Helper to check for null, empty, or placeholder values."""
     if value is None:
         return True
     if isinstance(value, str) and value.strip() in ('', 'nan', 'none', 'null', 'n/a'):
@@ -15,7 +15,7 @@ def _is_empty(value: Any) -> bool:
     return False
 
 def _is_non_empty(value: Any) -> bool:
-    """Проверка, является ли значение заполненным."""
+    """Helper to check for valid non-empty values."""
     return not _is_empty(value)
 
 def merge_lead_fields(
@@ -23,7 +23,7 @@ def merge_lead_fields(
     incoming: Dict[str, Any],
     incoming_file_date: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Создание копии существующего лида и слияние полей нового лида с существующим"""
+    """Merge incoming lead data into an existing record using priority and recency rules."""
     existing = existing.copy()
     existing_file_date = existing.get('_file_date')
 
@@ -91,7 +91,7 @@ def merge_lead_fields(
     return existing
 
 def deduplicate_batch(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Дедупликация списка лидов по email внутри одного пакета данных."""
+    """Deduplicate a list of leads by email within a single batch."""
     unique: Dict[str, Dict[str, Any]] = {}
     for record in records:
         email = record.get('email')
@@ -104,7 +104,7 @@ def deduplicate_batch(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(unique.values())
 
 def build_import_history_entry(source_file, source_name, file_date=None, raw_data=None) -> Dict[str, Any]:
-    """Создание записи для истории импорта конкретного лида."""
+    """Generate a history entry for a lead's meta_info audit trail."""
     entry = {
         'imported_at': datetime.now(tz=timezone.utc).isoformat(),
         'source_file': source_file,

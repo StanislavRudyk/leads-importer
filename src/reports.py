@@ -10,7 +10,7 @@ from src.notifier import notifier
 logger = logging.getLogger('leads_importer.reports')
 
 async def generate_weekly_report() -> None:
-    """Генерация и отправка еженедельного аналитического отчета в Telegram."""
+    """Generate and dispatch the weekly analytical report via Telegram."""
     one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
 
     async with AsyncSessionLocal() as session:

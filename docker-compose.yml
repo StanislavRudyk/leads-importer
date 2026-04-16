@@ -12,7 +12,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - internal
-    command: postgres -c max_connections=1000 -c shared_buffers=1GB
+    command: postgres -c max_connections=500 -c shared_buffers=1GB
 
   metabase-db:
     image: postgres:16
@@ -99,7 +99,7 @@ services:
       API_KEY: ${API_KEY}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
-      WEB_WORKERS: 4
+      WEB_WORKERS: 1
     volumes:
       - ./src:/app/src
       - ./imports:/app/imports

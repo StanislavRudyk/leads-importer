@@ -4,9 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 class Settings(BaseSettings):
-    """Конфигурация приложения с валидацией через Pydantic."""
+    """Application configuration with Pydantic validation."""
 
-    # База данных 
+    # Database connections
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/leads"
     SYNC_DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/leads"
 
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
 
-    # Настройки импорта
+    # setting import
     MAX_FILE_SIZE_MB: int = 100
     BATCH_SIZE: int = 2500
 

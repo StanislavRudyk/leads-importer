@@ -36,6 +36,11 @@ phone:
   - Telephone
   - "Mobile Number"
   - "mobile number"
+  - "Contact Number"
+  - "contact number"
+  - "Phone/Mobile"
+  - "Cell Phone"
+  - "Home Phone"
 
 first_name:
   - first_name
@@ -51,6 +56,13 @@ first_name:
   - "first name"
   - FirstName
   - given_name
+  - "Given Name"
+  - "First_Name"
+  - "Имя"
+  - "Contact Name"
+  - "Full Name"
+  - "fullname"
+  - "Fullname"
 
 last_name:
   - last_name
@@ -66,6 +78,9 @@ last_name:
   - LastName
   - family_name
   - Surname
+  - "Family Name"
+  - "Last_Name"
+  - "Фамилия"
 
 country_iso2:
   - country
@@ -141,3 +156,4 @@ tags:
   - labels
   - Labels
   - categories
+

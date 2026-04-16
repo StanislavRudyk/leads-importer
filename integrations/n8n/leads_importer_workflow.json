@@ -18,7 +18,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://leads-importer:8000/api/v1/import/upload",
+        "url": "http://backend:8000/api/v1/import/upload",
         "authentication": "headerAuth",
         "sendBinaryData": true,
         "binaryPropertyName": "data",

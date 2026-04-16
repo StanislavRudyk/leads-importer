@@ -45,7 +45,7 @@ def include_object(object, name, type_, reflected, compare_to):
     if type_ == "table":
         managed_tables = {
             'leads', 'import_logs', 'digest_recipients',
-            'dashboard_permissions', 'alembic_version',
+            'dashboard_permissions', 'alembic_version', 'markets',
         }
         if name not in managed_tables:
             return False
